@@ -1,0 +1,4 @@
+out/
+.claude/skills/scene-to-short/scripts/node_modules/
+.claude/skills/scene-to-short-workspace/
+backups/

@@ -1,0 +1,4 @@
+schema_version: "1.1"
+name: sun-lifecycle-2-adds-hook
+expected_outcome: |
+  A 1080x1920 H.264/AAC MP4 of one full sun-lifecycle-2 loop with its music in sync, plus a 1080x1920 thumbnail PNG. The scene gains a window.__capture hook and still works live in the browser.

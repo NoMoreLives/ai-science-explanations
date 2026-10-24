@@ -1,0 +1,4 @@
+schema_version: "1.1"
+name: black-hole-thumb-from-drop
+expected_outcome: |
+  A 1080x1920 MP4 of the full ~129 s black-hole loop (flagged as over 60 s but under the 3 min Shorts limit) and a thumbnail PNG taken from the drop section.
