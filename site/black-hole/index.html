@@ -95,11 +95,14 @@ const CHORDS = [[57, 60, 64], [57, 60, 64], [53, 57, 60], [55, 59, 62]];
 const RIFF = [
   [69,0,0,69, 0,0,67,0, 69,0,0,72, 0,0,71,0],
   [69,0,0,69, 0,0,67,0, 69,0,0,76, 0,0,74,72],
-  [65,0,0,65, 0,0,64,0, 65,0,0,69, 0,0,67,0],
+  [65,0,0,65, 0,0,60,0, 65,0,0,69, 0,0,67,0],
   [67,0,0,67, 0,0,71,0, 74,0,0,72, 0,71,0,67],
 ];
 const ACN = [0,0,12,0, -1,15,0,12, 0,-1,10,0, 12,0,3,7]; // acid: semitones over the root, -1 = rest
 const ACC = [1,0,1,0, 0,1,0,0, 1,0,1,0, 0,1,0,1];
+// A natural minor; acid notes snap down into it so they never rub against the chords or the lead
+const SCALE = [0, 2, 3, 5, 7, 8, 10];
+const inKey = m => { while (!SCALE.includes(((m - 9) % 12 + 12) % 12)) m--; return m; };
 
 function at(s) {
   s = ((s % TOTAL_STEPS) + TOTAL_STEPS) % TOTAL_STEPS;
@@ -128,7 +131,8 @@ function hit(layer, s) {
     case 'lead': return id === 'nova' || (D && !gap) ? RIFF[ch][i] : 0;
     case 'acid': {
       if (!(id === 'disk' || id === 'spag' || (D && !gap)) || (id === 'spag' && lb === 3 && i >= 12)) return 0;
-      return ACN[i] < 0 ? 0 : ROOT[ch] + 12 + ACN[i];
+      if (ACN[i] < 0 || (D && RIFF[ch][i])) return 0; // in the drop the acid answers in the lead's gaps
+      return inKey(ROOT[ch] + 12 + ACN[i]);
     }
     case 'snare':
       if ((id !== 'collapse' && id !== 'spag') || (lb === 3 && i >= 12)) return 0; // last beat: silence before the hit
@@ -405,7 +409,7 @@ const fact = (lines, border) => card(lines.map(l => typeof l === 'string' ? { t:
 const timeline = s => text(s, 90, 244, P.dim, 1, 'c');
 
 // ---------- audio (everything synthesised) ----------
-let ac = null, master, secGain, comp, duck, kickIn, rumble, bassIn, padIn, leadIn, percIn, acidIn, fxSend, teach;
+let ac = null, master, secGain, comp, duck, acidDuck, kickIn, rumble, bassIn, padIn, leadIn, percIn, acidIn, fxSend, teach;
 let sq125, sq25, sq50, noiseBuf, T0 = 0, muted = false, step = 0;
 const RUMBLE = { core: 0.45, collapse: 0.45, nova: 0.7, horizon: 0.6, disk: 0.6, spag: 0.25, drop: 0.8, outro: 0.5 };
 
@@ -475,7 +479,8 @@ function buildGraph() {
   padIn = G(0.5); padIn.connect(duck); padIn.connect(G(0.5)).connect(fxSend);
   leadIn = G(1); chain(leadIn, crunch(1.8, 64), F('lowpass', 4800), G(0.4), duck);
   leadIn.connect(G(0.25)).connect(fxSend);
-  acidIn = G(1); chain(acidIn, crunch(2.2, 40), F('lowpass', 6000), G(0.34), duck);
+  acidDuck = G(1); acidDuck.connect(duck); // dips under each lead stab
+  acidIn = G(1); chain(acidIn, crunch(2.2, 40), F('lowpass', 6000), G(0.34), acidDuck);
   acidIn.connect(G(0.2)).connect(fxSend);
   percIn = G(0.7); percIn.connect(comp);
   teach = G(1); teach.connect(master); // the chirp: a pure sine, no effects
@@ -569,12 +574,16 @@ function hoover(t, m, dur, vol) {
   const f = midi(m), g = ac.createGain();
   env(g, t, vol, 0.01, dur, 0.85);
   g.connect(leadIn);
-  for (const [w, mult, det] of [[sq25, 1, -16], [sq25, 1, 16], [sq50, 0.5, 0], ['sawtooth', 1, 5]]) {
+  // detuned pair panned wide so the lead sits around the centred acid, not on top of it
+  for (const [w, mult, det, pan] of [[sq25, 1, -16, -0.6], [sq25, 1, 16, 0.6], [sq50, 0.5, 0, 0], ['sawtooth', 1, 5, 0]]) {
     const o = osc(w, f * mult * 0.7, t);
     o.frequency.exponentialRampToValueAtTime(f * mult, t + 0.06);
     o.detune.value = det;
-    const og = G(0.2); chain(o, og, g); play(o, t, dur);
+    const og = G(0.2), sp = ac.createStereoPanner(); sp.pan.value = pan;
+    chain(o, og, sp, g); play(o, t, dur);
   }
+  acidDuck.gain.setValueAtTime(0.5, t);
+  acidDuck.gain.setTargetAtTime(1, t + 0.04, Math.max(0.03, dur * 0.35));
 }
 
 // the merger chirp at real pitch: Newtonian f(tau), slowed by CHIRP_SLOW, amplitude ~ f^(2/3), then a quick ringdown
