@@ -319,8 +319,12 @@ let ac = null, master, secGain, comp, kickIn, bassIn, padIn, leadIn, percIn, arp
 let sq125, sq25, sq50, noiseBuf, T0 = 0, muted = false, step = 0;
 
 const midi = m => 440 * Math.pow(2, (m - 69) / 12);
-const G = v => { const g = ac.createGain(); g.gain.value = v; return g; };
-const F = (type, f, Q = 0.7) => { const b = ac.createBiquadFilter(); b.type = type; b.frequency.value = f; b.Q.value = Q; return b; };
+// every node made while one step is being scheduled; all are disconnected once that step's last sound ends,
+// so finished notes don't pile up in the audio graph
+let bag = null;
+const track = n => { if (bag) bag.push(n); return n; };
+const G = v => { const g = track(ac.createGain()); g.gain.value = v; return g; };
+const F = (type, f, Q = 0.7) => { const b = track(ac.createBiquadFilter()); b.type = type; b.frequency.value = f; b.Q.value = Q; return b; };
 const chain = (...n) => { for (let i = 0; i < n.length - 1; i++) n[i].connect(n[i + 1]); return n[0]; };
 
 function pulseWave(d) {
@@ -345,7 +349,7 @@ function crunch(k, levels) {
 }
 
 function osc(wave, f, t) {
-  const o = ac.createOscillator();
+  const o = track(ac.createOscillator());
   if (typeof wave === 'string') o.type = wave; else o.setPeriodicWave(wave);
   o.frequency.setValueAtTime(f, t);
   return o;
@@ -386,8 +390,8 @@ function buildGraph() {
 }
 
 function noise(t, dur, vol, type, f, dest, Q = 0.8) {
-  const s = ac.createBufferSource(); s.buffer = noiseBuf;
-  const b = F(type, f, Q), g = ac.createGain();
+  const s = track(ac.createBufferSource()); s.buffer = noiseBuf;
+  const b = F(type, f, Q), g = track(ac.createGain());
   g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
   chain(s, b, g, dest);
   s.start(t, Math.random() * 0.5); s.stop(t + dur + 0.03);
@@ -399,14 +403,14 @@ function kick(t, vel, dur, root) {
   const o = osc('sine', 400, t);
   o.frequency.exponentialRampToValueAtTime(140, t + 0.016);
   o.frequency.exponentialRampToValueAtTime(midi(root - 12), t + 0.1);
-  const g = ac.createGain(); env(g, t, vel, 0.002, dur, 0.55);
+  const g = track(ac.createGain()); env(g, t, vel, 0.002, dur, 0.55);
   chain(o, g, kickIn); play(o, t, dur);
   noise(t, 0.012, vel * 0.7, 'highpass', 2500, kickIn);
 }
 
 // rolling chip bass: pulse + triangle sub through a snapping filter, then crunched
 function bass(t, m, dur) {
-  const f = midi(m), lp = F('lowpass', 2000, 7), g = ac.createGain();
+  const f = midi(m), lp = F('lowpass', 2000, 7), g = track(ac.createGain());
   lp.frequency.setValueAtTime(2200, t); lp.frequency.exponentialRampToValueAtTime(160, t + dur);
   env(g, t, 0.8, 0.003, dur);
   chain(lp, g, bassIn);
@@ -415,7 +419,7 @@ function bass(t, m, dur) {
 
 // industrial pad: detuned pulses under a sweeping filter, one bar long
 function pad(t, notes, dur, vol) {
-  const lp = F('lowpass', 300, 5), g = ac.createGain();
+  const lp = F('lowpass', 300, 5), g = track(ac.createGain());
   lp.frequency.setValueAtTime(260, t);
   lp.frequency.linearRampToValueAtTime(1500, t + dur * 0.5);
   lp.frequency.linearRampToValueAtTime(300, t + dur);
@@ -430,7 +434,7 @@ function pad(t, notes, dur, vol) {
 
 // metallic clank: inharmonic squares + noise, sent to the echo
 function clank(t) {
-  const bp = F('bandpass', 2400, 6), g = ac.createGain();
+  const bp = F('bandpass', 2400, 6), g = track(ac.createGain());
   env(g, t, 0.35, 0.001, 0.22);
   chain(bp, g, percIn); g.connect(fxSend);
   for (const f of [587, 845, 1293]) { const o = osc(sq50, f, t); o.connect(bp); play(o, t, 0.22); }
@@ -439,7 +443,7 @@ function clank(t) {
 
 // hoover: detuned pulses that swoop up into pitch
 function hoover(t, m, dur, vol) {
-  const f = midi(m), g = ac.createGain();
+  const f = midi(m), g = track(ac.createGain());
   env(g, t, vol, 0.01, dur, 0.85);
   g.connect(leadIn);
   for (const [w, mult, det] of [[sq25, 1, -16], [sq25, 1, 16], [sq50, 0.5, 0], ['sawtooth', 1, 5]]) {
@@ -453,7 +457,7 @@ function hoover(t, m, dur, vol) {
 function snare(t, vol, bpf) {
   noise(t, 0.13, vol, 'bandpass', bpf, percIn, 0.9);
   const o = osc('triangle', 220, t); o.frequency.exponentialRampToValueAtTime(150, t + 0.05);
-  const g = ac.createGain(); env(g, t, vol * 0.6, 0.001, 0.08);
+  const g = track(ac.createGain()); env(g, t, vol * 0.6, 0.001, 0.08);
   chain(o, g, percIn); play(o, t, 0.08);
 }
 function clap(t) {
@@ -463,20 +467,20 @@ function clap(t) {
 const hat = (t, open) => noise(t, open ? 0.15 : 0.03, open ? 0.32 : 0.18, 'highpass', open ? 7000 : 9000, percIn);
 const crash = t => { noise(t, 1.8, 0.4, 'highpass', 4500, percIn); noise(t, 1.2, 0.2, 'bandpass', 6000, fxSend); };
 function riser(t, dur, vol) {
-  const s = ac.createBufferSource(); s.buffer = noiseBuf; s.loop = true;
-  const bp = F('bandpass', 300, 2), g = ac.createGain();
+  const s = track(ac.createBufferSource()); s.buffer = noiseBuf; s.loop = true;
+  const bp = F('bandpass', 300, 2), g = track(ac.createGain());
   bp.frequency.setValueAtTime(300, t); bp.frequency.exponentialRampToValueAtTime(9000, t + dur);
   g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(vol, t + dur - 0.01); g.gain.linearRampToValueAtTime(0.0001, t + dur);
   chain(s, bp, g, percIn); s.start(t); s.stop(t + dur + 0.02);
 }
 function arp(t, m) {
-  const o = osc(sq125, midi(m), t), g = ac.createGain();
+  const o = osc(sq125, midi(m), t), g = track(ac.createGain());
   env(g, t, 0.16, 0.002, STEP * 0.9);
   chain(o, g, arpIn); play(o, t, STEP);
 }
 function blip(t) {
   for (const [f, d] of [[880, 0], [1320, 0.06]]) {
-    const o = osc(sq50, f, t + d), g = ac.createGain(); env(g, t + d, 0.08, 0.002, 0.09);
+    const o = osc(sq50, f, t + d), g = track(ac.createGain()); env(g, t + d, 0.08, 0.002, 0.09);
     chain(o, g, percIn); play(o, t + d, 0.09);
   }
 }
@@ -493,6 +497,15 @@ function kickDur(id, lb, i) {
 }
 
 function playStep(s, t) {
+  bag = [];
+  voices(s, t);
+  const nodes = bag, srcs = nodes.filter(n => typeof n.stop === 'function');
+  bag = null;
+  let left = srcs.length;
+  for (const n of srcs) n.onended = () => { if (--left === 0) for (const m of nodes) m.disconnect(); };
+}
+
+function voices(s, t) {
   const { id, lb, i } = at(s), ch = lb % 4;
   if (i === 0 && lb === 0 && id !== 'drop' && id !== 'title') blip(t);
   if (i === 0 && lb === 0) secGain.gain.setValueAtTime(id === 'drop' ? 1 : 0.75, t);

@@ -1,0 +1,1140 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Ice Comet: Techno Mix</title>
+<style>
+  html,body{margin:0;height:100%;background:#02040b;color:#5f7299;font:12px monospace}
+  body{display:flex;flex-direction:column;align-items:center;justify-content:center}
+  canvas{height:min(92vh,calc(100vw*16/9));aspect-ratio:9/16;image-rendering:pixelated;cursor:pointer;background:#050814}
+  p{margin:6px 16px 0;text-align:center}
+</style>
+</head>
+<body>
+<canvas id="c" width="180" height="320"></canvas>
+<p>click / space: play-pause &middot; m: mute &middot; headphones + volume up &middot; ?bpm=138 &amp;peri=0.586 &amp;aph=35.1 (AU) &amp;km=11 &amp;calm=1 (no shake/flash)</p>
+<script>
+(() => {
+'use strict';
+
+// ---------- config ----------
+const q = new URLSearchParams(location.search);
+const num = (k, d, lo, hi) => { const n = parseFloat(q.get(k)); return n >= lo && n <= hi ? n : d; };
+const BPM = num('bpm', 138, 100, 180);
+const CALM = q.get('calm') === '1';       // no screen shake or flashes
+const SHORT = q.get('short') === '1';     // YouTube Short: a hit on the first frame
+const DEBUG_T = q.has('t') ? parseFloat(q.get('t')) : null; // freeze visuals at t seconds (no audio)
+
+// the comet; defaults are Halley's. Every number drawn on screen comes from these.
+const COMET = {
+  peri: num('peri', 0.586, 0.1, 2.5),     // closest to the sun, AU
+  aph: num('aph', 35.1, 5, 200),          // furthest, AU
+  km: num('km', 11, 1, 60),               // nucleus diameter
+  density: 600,                           // kg/m^3: fluffy ice + dust
+  lossKg: 3e11,                           // mass boiled off per pass of the sun
+  oortAU: 50000, oortN: 1e12,             // Oort cloud: distance, rough head count
+  frostAU: 3,                             // water ice starts to sublimate inside this
+  comaKm1: 1.5e5,                         // coma diameter at 1 AU (~1/r further out)
+  windKms: 400,                           // solar wind
+  tailKm: 1e8,                            // long tails reach this
+  jetKms: 1,                              // gas leaving the jets
+  meteorKms: 66,                          // Halley's dust hitting Earth (Orionids)
+  cmbK: 2.7,
+};
+const HALLEY = !q.has('peri') && !q.has('aph');
+
+const VE = 29.78, KM_EARTH = 12742, T1AU = 278.6;        // Earth's orbital speed (km/s), diameter, blackbody temp at 1 AU
+const A = (COMET.peri + COMET.aph) / 2, E = (COMET.aph - COMET.peri) / (COMET.aph + COMET.peri), B = A * Math.sqrt(1 - E * E);
+const PER = Math.pow(A, 1.5);                                       // Kepler's third law, years
+const vAt = r => VE * Math.sqrt(2 / r - 1 / A);                     // vis-viva, km/s
+const tempK = r => Math.pow(T1AU ** 4 / (r * r) + COMET.cmbK ** 4, 0.25);
+const ffYrs = r => Math.pow(r, 1.5) / (4 * Math.SQRT2);             // free fall from rest to the sun
+// years after perihelion when the comet is at r (outbound)
+function tFromPeri(r) {
+  const e0 = Math.acos(Math.max(-1, Math.min(1, (1 - r / A) / E)));
+  return (e0 - E * Math.sin(e0)) / (2 * Math.PI) * PER;
+}
+// position tp years after perihelion: Kepler's equation by Newton's method
+function posAt(tp) {
+  let M = 2 * Math.PI * tp / PER;
+  M = Math.atan2(Math.sin(M), Math.cos(M));
+  let ea = Math.abs(M) < 0.3 ? Math.cbrt(6 * M) : M;
+  for (let k = 0; k < 40; k++) ea -= (ea - E * Math.sin(ea) - M) / (1 - E * Math.cos(ea));
+  return { ea, r: A * (1 - E * Math.cos(ea)), ox: A * (Math.cos(ea) - E), oy: B * Math.sin(ea), vx: -A * Math.sin(ea), vy: B * Math.cos(ea) };
+}
+const FROST = Math.max(COMET.frostAU, COMET.peri * 1.2);
+const RS = [0, 1, 2, 3, 4].map(k => FROST * Math.pow(COMET.peri / FROST, k / 4)); // where each inner scene starts/ends
+const NUC_R = COMET.km * 500;                                        // radius, m
+const NUC_KG = COMET.density * 4 / 3 * Math.PI * NUC_R ** 3;
+const LOSS_M = COMET.lossKg / (COMET.density * 4 * Math.PI * NUC_R ** 2);
+const N_LIFE = Math.round(NUC_KG / COMET.lossKg);
+const LIFE_YRS = N_LIFE * PER;
+const comaKm = r => COMET.comaKm1 / r;
+
+const W = 180, H = 320, X = 90, Y = 112;
+const STEP = 60 / BPM / 4, BAR = STEP * 16, BEAT = STEP * 4;
+
+// the track: one section per stage, each introducing one layer
+const SONG = [
+  { id: 'title', bars: 2 },
+  { id: 'cloud', bars: 8 },   // layer 1: gated ice pad (+ crystal tinks)
+  { id: 'fall', bars: 8 },    // layer 2: kick
+  { id: 'frost', bars: 8 },   // layer 3: metal hats
+  { id: 'coma', bars: 8 },    // layer 4: offbeat bass
+  { id: 'tails', bars: 8 },   // layer 5: arp lead
+  { id: 'peri', bars: 4 },    // build: tom roll + riser
+  { id: 'drop', bars: 32 },   // everything: outbound, meteors, shrinking, breakup
+  { id: 'outro', bars: 4 },   // pad: the dust trail
+];
+const BAR_SEC = [];
+{ let a = 0; SONG.forEach((s, k) => { s.start = a; s.k = k; a += s.bars; for (let b = 0; b < s.bars; b++) BAR_SEC.push(k); }); }
+const TOTAL_STEPS = BAR_SEC.length * 16;
+const LOOP = TOTAL_STEPS * STEP;
+
+// E minor: Em C G D
+const ROOT = [40, 36, 43, 38];
+const PADC = [[64, 67, 71], [64, 67, 72], [62, 67, 71], [62, 66, 69]];
+const ARPC = [[64, 67, 71], [60, 64, 67], [67, 71, 74], [62, 66, 69]];
+const ARPI = [0, 1, 2, 3, 4, 3, 2, 1, 0, 2, 4, 5, 4, 2, 3, 1];   // index into chord tones over two octaves
+const GATE = [1, 0, 1, 1, 0, 1, 1, 0, 1, 0, 1, 1, 0, 1, 0, 1];
+const HATV = [0.5, 0.3, 0, 0.45, 0.5, 0.3, 0, 0.7, 0.5, 0.3, 0, 0.45, 0.5, 0.75, 0, 0.55]; // closed hats; open hats fill the zeros
+const BASSN = [-1, -1, 0, 0, -1, -1, 0, 12, -1, -1, 0, 0, -1, -1, 0, 7];
+const arpTone = (ch, k) => ARPC[ch][k % 3] + 12 * Math.floor(k / 3);
+
+function at(s) {
+  s = ((s % TOTAL_STEPS) + TOTAL_STEPS) % TOTAL_STEPS;
+  const bar = (s / 16) | 0, sec = SONG[BAR_SEC[bar]];
+  return { sec, id: sec.id, lb: bar - sec.start, i: s % 16 };
+}
+
+// single source of truth for what plays on step s: audio, HUD and visuals all read this
+function hit(layer, s) {
+  const { id, lb, i } = at(s), ch = lb % 4, onBeat = i % 4 === 0;
+  const D = id === 'drop', part = lb >> 3, e8 = lb % 8;
+  const roll = D && e8 === 7 && i >= 12 && lb !== 31;  // kick roll into the next 8
+  const hush = id === 'peri' && lb === 3 && i >= 12;    // the silent beat before the drop
+  switch (layer) {
+    case 'pad':
+      if (id === 'cloud') return lb < 2 ? onBeat : lb < 4 ? i % 2 === 0 : GATE[i];
+      if (id === 'fall' && lb < 4) return GATE[i];
+      if (D) return GATE[i];
+      if (id === 'outro') return onBeat;
+      return 0;
+    case 'tink':
+      if ((id === 'cloud' && ((lb % 2 === 1 && i === 10) || (lb >= 4 && i === 3))) || (id === 'outro' && i === 10)) return arpTone(ch, (lb + i) % 3 + 3);
+      return 0;
+    case 'kick':
+      if (id === 'fall') return lb < 2 ? (i === 0 ? 0.8 : 0) : lb < 4 ? (i % 8 === 0 ? 0.9 : 0) : (onBeat ? 1 : 0);
+      if (id === 'frost' || id === 'coma' || id === 'tails') return onBeat ? 1 : 0;
+      if (id === 'peri') return hush ? 0 : lb < 2 ? (onBeat ? 1 : 0) : lb === 2 ? (i % 2 === 0 ? 0.9 : 0) : 0.55 + 0.035 * i;
+      if (D) return roll || onBeat ? 1 : 0;
+      return 0;
+    case 'hat':
+      if (id === 'frost') return lb < 2 ? 0 : lb < 4 ? (i % 2 === 1 ? 0.5 : 0) : HATV[i];
+      if (id === 'coma' || id === 'tails' || D) return HATV[i];
+      if (id === 'peri') return hush ? 0 : lb < 2 ? HATV[i] : 0.35 + 0.65 * ((lb - 2) * 16 + i) / 28;
+      return 0;
+    case 'ohat': return (id === 'frost' || id === 'coma' || id === 'tails' || D || (id === 'peri' && lb < 2)) && i % 4 === 2 ? 1 : 0;
+    case 'bass':
+      if (id === 'coma' && lb < 4) return i % 4 === 2 ? ROOT[ch] : 0;
+      if (id === 'coma' || id === 'tails' || (id === 'peri' && lb < 3) || (D && !roll)) return BASSN[i] >= 0 ? ROOT[ch] + BASSN[i] : 0;
+      return 0;
+    case 'arp':
+      if (id === 'tails') return lb < 4 && i % 2 ? 0 : arpTone(ch, ARPI[i]);
+      if (id === 'peri') return hush ? 0 : arpTone(ch, ARPI[i]);
+      if (D) return arpTone(ch, ARPI[i]) + (part === 2 ? 12 : 0);
+      return 0;
+    case 'clap': return ((id === 'tails' && lb >= 4 && i === 12) || (D && (i === 4 || i === 12))) ? 1 : 0;
+    case 'tom':
+      if (id !== 'peri' || hush) return 0;
+      return [i === 10 || i === 14, i >= 8 && i % 2 === 0, i % 2 === 0, true][lb] ? 1 : 0;
+    case 'crash': return i === 0 && ((D && e8 === 0) || (id === 'outro' && lb === 0)) ? 1 : 0;
+    case 'hats': return hit('hat', s) || hit('ohat', s);
+    case 'perc': return hit('tink', s) || hit('clap', s) || hit('tom', s);
+  }
+  return 0;
+}
+
+// arp filter opening 0..1, read by audio and the tail glow
+function arpOpen(s) {
+  const { id, lb, i } = at(s), x = lb * 16 + i;
+  if (id === 'tails') return 0.1 + 0.6 * x / 128;
+  if (id === 'peri') return 0.6 + 0.4 * x / 64;
+  if (id === 'drop') return lb >= 24 ? 1 : 0.45 + 0.55 * (x % 128) / 128;
+  return 0.5;
+}
+
+const P = {
+  bg: '#050814', grid: '#0f1a33', edge: '#2a3d66', dim: '#7f93c0', fg: '#eef6ff', shadow: '#000000', white: '#ffffff',
+  pad: '#b4a7ff', padD: '#3a3170', kick: '#ffcf3a', kickD: '#6e5512', hat: '#ff6ad5', hatD: '#5e1f52',
+  bass: '#5cf08a', bassD: '#1a5a33', arp: '#4cc3ff', arpD: '#174a6e', perc: '#ff8a3a', percD: '#6a3410',
+  dust: '#ffe9b0', dustD: '#8a6a3a', ice: '#d8f1ff', rock: '#4a4352', rockD: '#221d29', rockL: '#7d7390',
+  earth: '#2f6bd8', land: '#3fae5a',
+};
+const SUN = [P.kick, '#c07a10', P.kick, '#fff6c8'];
+const CYC = [P.arp, P.hat, P.bass, P.kick, P.pad, P.perc];
+
+// ---------- canvas + gfx helpers ----------
+const cv = document.getElementById('c');
+const cx = cv.getContext('2d');
+cx.imageSmoothingEnabled = false;
+
+// 3x5 pixel font, rows top to bottom
+const FONT = {
+  A:'010 101 111 101 101', B:'110 101 110 101 110', C:'011 100 100 100 011', D:'110 101 101 101 110',
+  E:'111 100 110 100 111', F:'111 100 110 100 100', G:'011 100 101 101 011', H:'101 101 111 101 101',
+  I:'111 010 010 010 111', J:'001 001 001 101 010', K:'101 101 110 101 101', L:'100 100 100 100 111',
+  M:'101 111 111 101 101', N:'110 101 101 101 101', O:'010 101 101 101 010', P:'110 101 110 100 100',
+  Q:'010 101 101 111 011', R:'110 101 110 101 101', S:'011 100 010 001 110', T:'111 010 010 010 010',
+  U:'101 101 101 101 111', V:'101 101 101 101 010', W:'101 101 111 111 101', X:'101 101 010 101 101',
+  Y:'101 101 010 010 010', Z:'111 001 010 100 111',
+  0:'111 101 101 101 111', 1:'010 110 010 010 111', 2:'110 001 010 100 111', 3:'110 001 010 001 110',
+  4:'101 101 111 001 001', 5:'111 100 110 001 110', 6:'011 100 111 101 111', 7:'111 001 010 010 010',
+  8:'111 101 111 101 111', 9:'111 101 111 001 110',
+  '-':'000 000 111 000 000', '.':'000 000 000 000 010', ':':'000 010 000 010 000',
+  '=':'000 111 000 111 000', '+':'000 010 111 010 000', '!':'010 010 010 000 010', '?':'110 001 010 000 010',
+  '>':'100 010 001 010 100', '<':'001 010 100 010 001', '/':'001 001 010 100 100', ',':'000 000 000 010 100',
+  '(':'010 100 100 100 010', ')':'010 001 001 001 010', "'":'010 010 000 000 000', '~':'000 011 110 000 000',
+  '^':'010 101 000 000 000', '#':'101 111 101 111 101', '%':'101 001 010 100 101',
+};
+const GL = {};
+for (const k in FONT) GL[k] = FONT[k].replace(/ /g, '');
+
+const textW = (s, sc) => s.length * 4 * sc - sc;
+function text(s, x, y, col, sc = 1, align = 'l') {
+  s = String(s).toUpperCase();
+  if (align === 'c') x = Math.round(x - textW(s, sc) / 2);
+  else if (align === 'r') x -= textW(s, sc);
+  cx.fillStyle = col;
+  for (let i = 0; i < s.length; i++) {
+    const g = GL[s[i]];
+    if (!g) continue;
+    for (let k = 0; k < 15; k++) {
+      if (g[k] === '1') cx.fillRect(x + i * 4 * sc + (k % 3) * sc, y + ((k / 3) | 0) * sc, sc, sc);
+    }
+  }
+}
+
+// bordered caption box; lines = [{t, c, s}]
+function card(lines, y, cxp = 90, border = P.fg) {
+  let w = 0, h = 4;
+  for (const l of lines) { const s = l.s || 1; w = Math.max(w, textW(String(l.t), s)); h += 5 * s + 3; }
+  w += 10;
+  if (w > W) console.warn('card too wide:', lines.map(l => l.t).join(' / '));
+  const x = Math.round(cxp - w / 2);
+  cx.fillStyle = P.shadow; cx.fillRect(x + 2, y + 2, w, h);
+  cx.fillStyle = P.bg;     cx.fillRect(x, y, w, h);
+  cx.fillStyle = border;
+  cx.fillRect(x, y, w, 1); cx.fillRect(x, y + h - 1, w, 1);
+  cx.fillRect(x, y, 1, h); cx.fillRect(x + w - 1, y, 1, h);
+  let ty = y + 4;
+  for (const l of lines) { const s = l.s || 1; text(l.t, cxp, ty, l.c || P.fg, s, 'c'); ty += 5 * s + 3; }
+  return h;
+}
+
+const BAYER = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
+const bay = (x, y) => BAYER[(y & 3) * 4 + (x & 3)];
+
+function fillCircle(x, y, r, col) {
+  if (r < 0) return;
+  cx.fillStyle = col;
+  for (let dy = -r; dy <= r; dy++) {
+    const dx = Math.floor(Math.sqrt((r + .5) * (r + .5) - dy * dy));
+    cx.fillRect(x - dx, y + dy, 2 * dx + 1, 1);
+  }
+}
+
+// ordered-dither ring/disc, d = 0..1 density
+function ditherCircle(x, y, r0, r1, col, d) {
+  if (d <= 0) return;
+  x = Math.round(x); y = Math.round(y); r1 = Math.round(r1);
+  cx.fillStyle = col;
+  const lvl = d * 16;
+  for (let py = y - r1; py <= y + r1; py++) {
+    if (py < 0 || py >= H) continue;
+    for (let px = x - r1; px <= x + r1; px++) {
+      const dd = (px - x) ** 2 + (py - y) ** 2;
+      if (dd <= r1 * r1 && dd >= r0 * r0 && bay(px, py) < lvl) cx.fillRect(px, py, 1, 1);
+    }
+  }
+}
+
+// thin dithered ring, sampled by angle; sy squashes it into an ellipse
+function ring(x, y, r, col, th, d, sy = 1) {
+  if (d <= 0 || r < 1) return;
+  cx.fillStyle = col;
+  const lvl = d * 16, n = Math.ceil(r * 7) + 8;
+  for (let k = 0; k < n; k++) {
+    const a = k / n * 2 * Math.PI, c = Math.cos(a), s = Math.sin(a);
+    for (let j = 0; j < th; j++) {
+      const px = Math.round(x + c * (r + j)), py = Math.round(y + s * (r + j) * sy);
+      if (bay(px, py) < lvl) cx.fillRect(px, py, 1, 1);
+    }
+  }
+}
+
+function line(x0, y0, x1, y1, col, d = 1) {
+  cx.fillStyle = col;
+  const n = Math.max(Math.abs(x1 - x0), Math.abs(y1 - y0), 1);
+  for (let k = 0; k <= n; k++) {
+    const px = Math.round(x0 + (x1 - x0) * k / n), py = Math.round(y0 + (y1 - y0) * k / n);
+    if (d >= 1 || bay(px, py) < d * 16) cx.fillRect(px, py, 1, 1);
+  }
+}
+
+function arrow(x0, y0, x1, y1, col) {
+  line(x0, y0, x1, y1, col);
+  const a = Math.atan2(y1 - y0, x1 - x0);
+  for (const s of [-1, 1]) line(x1, y1, x1 + 4 * Math.cos(a + s * 2.5), y1 + 4 * Math.sin(a + s * 2.5), col);
+}
+
+function dot(px, py, col, d) {
+  px = Math.round(px); py = Math.round(py);
+  if (bay(px, py) < d * 16) { cx.fillStyle = col; cx.fillRect(px, py, 1, 1); }
+}
+
+// dithered pattern fills: d of a 4x4 tile in col (cached)
+const PAT = {};
+function ditherFill(col, d) {
+  const n = Math.max(0, Math.min(16, Math.round(d * 16)));
+  if (!n) return;
+  const key = col + n;
+  if (!PAT[key]) {
+    const t = document.createElement('canvas'); t.width = t.height = 4;
+    const c = t.getContext('2d'); c.fillStyle = col;
+    for (let i = 0; i < 16; i++) if (BAYER[i] < n) c.fillRect(i % 4, (i / 4) | 0, 1, 1);
+    PAT[key] = cx.createPattern(t, 'repeat');
+  }
+  cx.fillStyle = PAT[key]; cx.fillRect(0, 0, W, H);
+}
+
+function mulberry(a) { return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+const rng = mulberry(1986);
+const hash = n => { n = Math.imul(n ^ 0x5bd1e995, 0x27d4eb2d); n ^= n >>> 15; n = Math.imul(n, 0x85ebca6b); n ^= n >>> 13; return (n >>> 0) / 4294967296; };
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const angDiff = (a, b) => Math.atan2(Math.sin(a - b), Math.cos(a - b));
+
+// a star: dithered corona, limb, body, hot spot and boiling granulation
+function sun(x, y, r, pal, t, glow = 0.35) {
+  r = Math.max(1, Math.round(r));
+  ditherCircle(x, y, r, Math.round(r * 1.3) + 4, pal[0], glow);
+  fillCircle(x, y, r, pal[1]);
+  if (r < 3) return;
+  fillCircle(x, y, r - 2, pal[2]);
+  fillCircle(x - Math.round(r * 0.22), y - Math.round(r * 0.22), Math.round(r * 0.5), pal[3]);
+  if (r < 6) return;
+  cx.fillStyle = pal[1];
+  const rr = (r - 2) * (r - 2), sc = 6 / r + 0.25;
+  for (let py = -r + 2; py <= r - 2; py++) {
+    for (let px = -r + 2; px <= r - 2; px++) {
+      if (px * px + py * py > rr) continue;
+      const v = Math.sin(px * sc * 1.7 + t * 1.9) * Math.sin(py * sc * 2.1 - t * 1.3) + Math.sin((px - py) * sc + t * 0.7) * 0.6;
+      if (v > 0.95 && bay(x + px, y + py) < 8) cx.fillRect(x + px, y + py, 1, 1);
+    }
+  }
+}
+
+const STARS = Array.from({ length: 140 }, () => ({ x: rng() * W | 0, y: rng() * H | 0, a: rng() * 6.283, d: rng(), b: rng() }));
+const starCol = (k, t, s) => (k * 7 + Math.floor(t * 6)) % 11 === 0 ? P.fg : s.b > 0.6 ? P.dim : P.edge;
+function stars(t, dx = 0) {
+  STARS.forEach((s, k) => { cx.fillStyle = starCol(k, t, s); cx.fillRect(((s.x + dx) % W + W) % W | 0, s.y, 1, 1); });
+}
+
+// the nucleus: a dark, lumpy, tumbling potato, sunlit on one side, with bright patches of exposed ice
+function nucleus(x, y, r, t, sunA, ice = 1) {
+  const spin = t * 0.35, rm = Math.ceil(r * 1.4), sx = Math.cos(sunA), sy = Math.sin(sunA);
+  for (let py = -rm; py <= rm; py++) for (let px = -rm; px <= rm; px++) {
+    const u = px / 1.35, d = Math.hypot(u, py), a = Math.atan2(py, u) - spin;
+    const R = r * (1 + 0.2 * Math.sin(2 * a + 1) + 0.1 * Math.sin(3 * a + 2.2) + 0.05 * Math.sin(7 * a));
+    if (d > R) continue;
+    const lit = (px * sx + py * sy) / (R + 1), edge = d > R - 1.2;
+    const patch = ice > 0 && Math.sin(a * 5 + 1) * Math.sin(d / r * 7 - 1) > 0.72 - 0.2 * ice;
+    cx.fillStyle = patch && lit > -0.2 ? P.ice : edge ? (lit > 0.2 ? P.rockL : P.rockD) : lit > 0.45 ? P.rockL : lit > -0.25 ? P.rock : P.rockD;
+    cx.fillRect(x + px, y + py, 1, 1);
+  }
+}
+
+// gas jets off the sunlit side: one plume per hat, widening as it flies
+function jets(x, y, r, t, s, sunA, col, spd = 70, back = 28) {
+  for (let k = 0; k < back; k++) {
+    const st = s - k, v = hit('hat', st) || (hit('ohat', st) ? 1 : 0);
+    if (!v) continue;
+    const dt = t - st * STEP, a = sunA + (hash(st * 7) - 0.5) * 1.8, d0 = r * 1.15, d1 = d0 + dt * spd;
+    const life = 1 - dt / (back * STEP), c = Math.cos(a), sn = Math.sin(a);
+    for (let j = 0; j < 4 + v * 10; j++) {
+      const dd = d1 - j * 1.4;
+      if (dd < d0) break;
+      const sp = (dd - d0) * 0.22;
+      for (const o of [-1, 0, 1]) dot(x + c * dd - sn * o * sp, y + sn * dd + c * o * sp, j === 0 && dt < 0.1 ? P.white : col, life * (o ? 0.45 : 0.9));
+    }
+  }
+}
+
+// a whole comet: coma, straight ion tail (away from the sun), dust tail curving back along the path.
+// Each arp note fires a knot down the ion tail and a grain down the dust tail.
+function comet(x, y, o, t, s) {
+  const ia = o.sunA + Math.PI, len = Math.round(o.len), ca = Math.cos(ia), sa = Math.sin(ia);
+  const bend = clamp(angDiff(o.velA + Math.PI, ia), -1, 1) * 0.6;
+  const path = [[x, y, ia]];
+  for (let d = 1; d <= len; d++) {
+    const a = ia + bend * d / len, p = path[d - 1];
+    path.push([p[0] + Math.cos(a), p[1] + Math.sin(a), a]);
+  }
+  const ae = o.ae ?? 0;
+  // dust: wide, cream, fading
+  for (let d = 2; d <= len; d += 1) {
+    const [px, py, a] = path[d], w = 1 + d * 0.16, nx = -Math.sin(a), ny = Math.cos(a);
+    for (let j = -w; j <= w; j++) dot(px + nx * j, py + ny * j, Math.abs(j) < w * 0.35 ? P.dust : P.dustD, o.dust * (1 - d / len) * (1 - Math.abs(j) / (w + 1)));
+  }
+  // ion: narrow, blue, straight, rippling in the solar wind
+  const il = Math.round(len * 1.15);
+  for (let d = 2; d <= il; d++) {
+    const w = 0.5 + d * 0.035, wob = Math.sin(d * 0.12 - t * 5) * d * 0.025;
+    for (let j = -w; j <= w; j++) dot(x + ca * d - sa * (j + wob), y + sa * d + ca * (j + wob), Math.abs(j) < 0.8 ? P.arp : P.arpD, o.ion * (0.35 + 0.4 * ae) * (1 - d / il));
+  }
+  for (let k = 0; k < 40; k++) {
+    const st = s - k;
+    if (!hit('arp', st)) continue;
+    const dt = t - st * STEP, d = 4 + dt * (o.knot ?? 150), g = 3 + dt * 32;
+    if (d < il) { cx.fillStyle = k === 0 ? P.white : P.arp; cx.fillRect(Math.round(x + ca * d), Math.round(y + sa * d), 2, 1); }
+    if (g < len) { const [px, py, a] = path[Math.round(g)], j = (hash(st * 3) - 0.5) * (1 + g * 0.3); dot(px - Math.sin(a) * j, py + Math.cos(a) * j, P.dust, 1); }
+  }
+  ditherCircle(x, y, 0, o.coma, P.bassD, 0.4);
+  ditherCircle(x, y, 0, Math.round(o.coma * 0.55), P.bass, 0.35 + 0.3 * (o.be ?? 0));
+  ditherCircle(x, y, 0, 3, P.ice, 0.8);
+  fillCircle(Math.round(x), Math.round(y), 1, P.white);
+}
+
+// Earth: ocean, a couple of continents, atmosphere
+function earth(x, y, r, t) {
+  ditherCircle(x, y, r, r + 3, P.arp, 0.4);
+  fillCircle(x, y, r, P.earth);
+  cx.fillStyle = P.land;
+  for (let py = -r; py <= r; py++) for (let px = -r; px <= r; px++) {
+    if (px * px + py * py > (r - 1) * (r - 1)) continue;
+    const u = px / r + t * 0.05;
+    if (Math.sin(u * 7) * Math.sin(py / r * 5 + 1) + Math.sin(u * 3 + py / r * 2) * 0.5 > 0.55) cx.fillRect(x + px, y + py, 1, 1);
+  }
+  for (let py = -r; py <= r; py++) for (let px = -r; px <= r; px++) {   // night side to the right
+    const dd = px * px + py * py;
+    if (dd <= r * r && px > r * 0.35 && bay(x + px, y + py) < (px / r - 0.35) * 30) { cx.fillStyle = P.bg; cx.fillRect(x + px, y + py, 1, 1); }
+  }
+}
+
+// ---------- text helpers ----------
+function fmtNum(v) { return v >= 10 ? String(Math.round(v)) : String(Math.round(v * 10) / 10); }
+function sci(v) {
+  if (v >= 0.1 && v < 1e4) return fmtNum(v);
+  let e = Math.floor(Math.log10(v)), m = Math.round(v / 10 ** e * 10) / 10;
+  if (m >= 10) { m = 1; e++; }
+  return (m === 1 ? '' : m + ' X ') + '10^' + e;
+}
+function fmtBig(v) {
+  if (v >= 1e15) return sci(v);
+  if (v >= 1e12) return fmtNum(v / 1e12) + ' TRILLION';
+  if (v >= 1e9) return fmtNum(v / 1e9) + ' BILLION';
+  if (v >= 1e6) return fmtNum(v / 1e6) + ' MILLION';
+  if (v >= 1e4) return Math.round(v).toLocaleString('en-US');
+  return fmtNum(v);
+}
+const yrsOrDays = y => y >= 1 ? `${fmtNum(y)} YRS` : `${fmtNum(y * 365.25)} DAYS`;
+const banner = (title, sub, col, subCol = P.fg) => card([{ t: title, s: 2, c: col }, { t: sub, c: subCol }], 4, 90, col);
+const fact = (lines, border) => card(lines.map(l => typeof l === 'string' ? { t: l } : l), 200, 90, border);
+const timeline = s => text(s, 90, 244, P.dim, 1, 'c');
+
+// ---------- audio (everything synthesised) ----------
+let ac = null, master, secGain, comp, duck, kickIn, bassIn, padIn, arpIn, percIn, fxSend;
+let sq125, sq25, sq50, noiseBuf, T0 = 0, muted = false, step = 0;
+
+const midi = m => 440 * Math.pow(2, (m - 69) / 12);
+// every node made while one step is being scheduled; all are disconnected once that step's last sound ends
+// (Chrome tidies finished notes up by itself, Safari keeps processing them and slows to a crawl)
+let bag = null;
+const track = n => { if (bag) bag.push(n); return n; };
+const G = v => { const g = track(ac.createGain()); g.gain.value = v; return g; };
+const F = (type, f, Q = 0.7) => { const b = track(ac.createBiquadFilter()); b.type = type; b.frequency.value = f; b.Q.value = Q; return b; };
+const chain = (...n) => { for (let i = 0; i < n.length - 1; i++) n[i].connect(n[i + 1]); return n[0]; };
+const pan = v => { const p = track(ac.createStereoPanner()); p.pan.value = v; return p; };
+
+function pulseWave(d) {
+  const N = 64, re = new Float32Array(N), im = new Float32Array(N);
+  for (let n = 1; n < N; n++) {
+    const a = 2 / (n * Math.PI);
+    re[n] = a * Math.sin(n * Math.PI * d) * Math.cos(n * Math.PI * d);
+    im[n] = a * Math.sin(n * Math.PI * d) ** 2;
+  }
+  return ac.createPeriodicWave(re, im);
+}
+
+// smooth tanh saturation (warm, not crushed)
+function warm(k) {
+  const n = 2048, c = new Float32Array(n);
+  for (let i = 0; i < n; i++) { const x = i / (n - 1) * 2 - 1; c[i] = Math.tanh(k * x) / Math.tanh(k); }
+  const s = ac.createWaveShaper(); s.curve = c; s.oversample = '2x';
+  return s;
+}
+
+function osc(wave, f, t) {
+  const o = track(ac.createOscillator());
+  if (typeof wave === 'string') o.type = wave; else o.setPeriodicWave(wave);
+  o.frequency.setValueAtTime(f, t);
+  return o;
+}
+function env(g, t, vol, atk, dur, hold) {
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.linearRampToValueAtTime(vol, t + atk);
+  if (hold) { g.gain.setValueAtTime(vol, t + dur * hold); }
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+}
+function play(o, t, dur) { o.start(t); o.stop(t + dur + 0.03); }
+
+function buildGraph() {
+  master = G(0.0001);
+  comp = ac.createDynamicsCompressor();
+  comp.threshold.value = -14; comp.knee.value = 6; comp.ratio.value = 5; comp.attack.value = 0.003; comp.release.value = 0.12;
+  secGain = G(0.78); // section level: the drop gets the headroom
+  chain(comp, secGain, master, ac.destination);
+  // sidechain bus: pad, bass and arp pump against the kick
+  duck = G(1); duck.connect(comp);
+  // ping-pong echo, dotted eighth, each side darker than the last
+  const dl = ac.createDelay(1), dr = ac.createDelay(1);
+  dl.delayTime.value = dr.delayTime.value = STEP * 3;
+  const fbl = G(0.42), fbr = G(0.42), lpl = F('lowpass', 3200), lpr = F('lowpass', 2600);
+  fxSend = G(1);
+  const merge = ac.createChannelMerger(2);
+  chain(fxSend, dl, lpl, fbl, dr, lpr, fbr, dl);
+  lpl.connect(merge, 0, 0); lpr.connect(merge, 0, 1);
+  chain(merge, G(0.55), comp);
+  kickIn = G(1);
+  chain(kickIn, warm(1.8), F('lowpass', 9000), G(0.75), comp);
+  bassIn = G(1);
+  chain(bassIn, F('lowpass', 1600, 1.5), G(0.42), duck);
+  padIn = G(1);
+  chain(padIn, F('highpass', 240), G(0.5), duck);
+  padIn.connect(G(0.3)).connect(fxSend);
+  arpIn = G(1);
+  chain(arpIn, G(0.42), duck);
+  arpIn.connect(G(0.35)).connect(fxSend);
+  percIn = G(0.8); percIn.connect(comp);
+  sq125 = pulseWave(0.125); sq25 = pulseWave(0.25); sq50 = pulseWave(0.5);
+  noiseBuf = ac.createBuffer(1, ac.sampleRate, ac.sampleRate);
+  const d = noiseBuf.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+}
+
+function noise(t, dur, vol, type, f, dest, Q = 0.8) {
+  const s = track(ac.createBufferSource()); s.buffer = noiseBuf;
+  const b = F(type, f, Q), g = G(1);
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  chain(s, b, g, dest);
+  s.start(t, Math.random() * 0.5); s.stop(t + dur + 0.03);
+}
+
+// techno kick: fast pitch dive onto a low E, a tick of click, warm saturation; ducks the melodic bus
+const KICK_NOTE = 28;
+function kick(t, vel, dur) {
+  const o = osc('sine', 190, t);
+  o.frequency.exponentialRampToValueAtTime(midi(KICK_NOTE) * 1.5, t + 0.03);
+  o.frequency.exponentialRampToValueAtTime(midi(KICK_NOTE), t + 0.12);
+  const g = G(1); env(g, t, vel, 0.001, dur, 0.35);
+  chain(o, g, kickIn); play(o, t, dur);
+  const c = osc(sq50, 1600, t), cg = G(1); env(cg, t, vel * 0.18, 0.0005, 0.01);
+  chain(c, cg, kickIn); play(c, t, 0.01);
+  duck.gain.setValueAtTime(0.25, t);
+  duck.gain.setTargetAtTime(1, t + 0.03, 0.08);
+}
+
+// sub boom on the big downbeats
+function impact(t) {
+  const o = osc('sine', 120, t), g = G(1);
+  o.frequency.exponentialRampToValueAtTime(30, t + 1.2);
+  env(g, t, 0.8, 0.003, 1.4, 0.15);
+  chain(o, g, kickIn); play(o, t, 1.4);
+}
+
+// 808-style metal: six detuned squares, bandpassed; hats and the crash are all made of this
+const METAL = [205.3, 304.4, 369.6, 522.7, 540, 800];
+function metal(t, dur, vol, hp, p = 0, dest = percIn) {
+  const bp = F('bandpass', 10000, 0.9), g = G(1);
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  chain(bp, F('highpass', hp), g, pan(p), dest);
+  for (const f of METAL) { const o = osc('square', f * 1.6, t); o.connect(bp); play(o, t, dur); }
+}
+const hat = (t, vel, p) => metal(t, 0.025 + vel * 0.035, 0.1 + 0.22 * vel, 7500, p);
+const ohat = t => metal(t, 0.22, 0.28, 6500, 0);
+const crash = t => { metal(t, 1.6, 0.35, 4000, -0.3); metal(t + 0.002, 1.4, 0.25, 5000, 0.3, fxSend); noise(t, 1.2, 0.18, 'highpass', 6000, percIn); };
+
+// offbeat bass: triangle sub + pulse, a quick filter pluck
+function bass(t, m, dur) {
+  const f = midi(m), lp = F('lowpass', 1400, 4), g = G(1);
+  lp.frequency.setValueAtTime(1600, t); lp.frequency.exponentialRampToValueAtTime(220, t + dur);
+  env(g, t, 0.85, 0.003, dur, 0.4);
+  chain(lp, g, bassIn);
+  for (const [w, m2, v] of [['triangle', 1, 1], [sq50, 1, 0.45], ['triangle', 0.5, 0.8]]) { const o = osc(w, f * m2, t); chain(o, G(v), lp); play(o, t, dur); }
+}
+
+// gated ice pad: the chord re-struck on every gate step, glassy triangles + a thin 12.5% pulse an octave up, ping-ponged
+function icePad(t, notes, dur, vol, p) {
+  const lp = F('lowpass', 5200, 2), g = G(1), sp = pan(p);
+  lp.frequency.setValueAtTime(5200, t); lp.frequency.exponentialRampToValueAtTime(1100, t + dur);
+  env(g, t, vol, 0.004, dur, 0.25);
+  chain(lp, g, sp, padIn);
+  for (const m of notes) {
+    const a = osc('triangle', midi(m), t); a.detune.value = 4; a.connect(lp); play(a, t, dur);
+    const b = osc(sq125, midi(m + 12), t); b.detune.value = -6; chain(b, G(0.3), lp); play(b, t, dur);
+  }
+}
+
+// crystal tink: a bell (sine + inharmonic 2.76x partial), sent long into the echo
+function tink(t, m) {
+  const f = midi(m + 12), g = G(1);
+  env(g, t, 0.16, 0.001, 0.5);
+  chain(g, pan((hash(Math.round(t * 100)) - 0.5) * 1.2), percIn); g.connect(fxSend);
+  for (const [mul, v] of [[1, 1], [2.76, 0.4], [5.4, 0.15]]) { const o = osc('sine', f * mul, t); chain(o, G(v), g); play(o, t, 0.5); }
+}
+
+// the lead: a 16th-note arp, 25% pulse doubled by a 12.5% one, through a resonant pluck filter
+function arpNote(t, m, open, vol, p) {
+  const f = midi(m), base = 500 + 4500 * open, lp = F('lowpass', base, 7), g = G(1), dur = STEP * 0.92;
+  lp.frequency.setValueAtTime(Math.min(base * 2.4, ac.sampleRate * 0.45), t); lp.frequency.exponentialRampToValueAtTime(base * 0.6, t + dur);
+  env(g, t, vol, 0.002, dur, 0.2);
+  chain(lp, g, pan(p), arpIn);
+  for (const [w, det, v] of [[sq25, -5, 1], [sq125, 7, 0.6]]) { const o = osc(w, f, t); o.detune.value = det; chain(o, G(v), lp); play(o, t, dur); }
+}
+
+// build toms: a pitch-dropping triangle body over a short noise skin
+function tom(t, m, vol) {
+  const o = osc('triangle', midi(m) * 1.7, t), g = G(1);
+  o.frequency.exponentialRampToValueAtTime(midi(m), t + 0.04);
+  env(g, t, vol, 0.001, 0.2);
+  chain(o, g, percIn); play(o, t, 0.2);
+  noise(t, 0.03, vol * 0.4, 'bandpass', 2500, percIn, 1.5);
+}
+function clap(t) {
+  for (const d of [0, 0.008, 0.017, 0.026]) noise(t + d, d === 0.026 ? 0.14 : 0.01, 0.5, 'bandpass', 1800, percIn, 1.4);
+  noise(t + 0.026, 0.25, 0.14, 'highpass', 1500, fxSend);
+}
+function riser(t, dur, vol) {
+  const s = track(ac.createBufferSource()); s.buffer = noiseBuf; s.loop = true;
+  const bp = F('bandpass', 400, 3), g = G(1);
+  bp.frequency.setValueAtTime(400, t); bp.frequency.exponentialRampToValueAtTime(11000, t + dur);
+  g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(vol, t + dur - 0.01); g.gain.linearRampToValueAtTime(0.0001, t + dur);
+  chain(s, bp, g, percIn); s.start(t); s.stop(t + dur + 0.02);
+}
+// scene change: two falling triangle chimes
+function chime(t) {
+  for (const [f, d] of [[2093, 0], [1568, 0.07]]) {
+    const o = osc('triangle', f, t + d), g = G(1); env(g, t + d, 0.12, 0.002, 0.25);
+    chain(o, g, percIn); g.connect(fxSend); play(o, t + d, 0.25);
+  }
+}
+
+function padDur(id, lb, i) {
+  if (id === 'outro' || (id === 'cloud' && lb < 2)) return BEAT * 0.95;
+  if (id === 'cloud' && lb < 4) return STEP * 1.9;
+  let n = 1;
+  while (i + n < 16 && !GATE[i + n]) n++;
+  return n * STEP * 0.9;
+}
+function kickDur(id, lb, i) {
+  if (id === 'fall' && lb < 4) return 0.55;   // solo: long tails
+  if (id === 'peri' && lb === 3) return STEP * 0.9;
+  if (id === 'drop' && i % 4) return STEP * 0.9;
+  return 0.3;
+}
+
+function playStep(s, t) {
+  bag = [];
+  voices(s, t);
+  const nodes = bag, srcs = nodes.filter(n => typeof n.stop === 'function');
+  bag = null;
+  let left = srcs.length;
+  for (const n of srcs) n.onended = () => { if (--left === 0) for (const m of nodes) m.disconnect(); };
+}
+
+function voices(s, t) {
+  const { id, lb, i } = at(s), ch = lb % 4, D = id === 'drop', e8 = lb % 8, part = lb >> 3;
+  if (i === 0) secGain.gain.setValueAtTime(D ? 1 : 0.78, t);
+  if (i === 0 && lb === 0 && !D && id !== 'title' && id !== 'outro') chime(t);
+  if (id === 'title' && lb === 0 && i === 0) riser(t, BAR * 2, 0.5);
+  if (SHORT && s === 0) { impact(t); kick(t, 1, 0.3); crash(t); bass(t, ROOT[0], STEP * 2); icePad(t, PADC[0], BEAT, 0.12, 0); } // the Short can't open on a quiet riser
+  if (id === 'peri' && lb === 0 && i === 0) riser(t, BAR * 3.75, 1.5);
+  if (D && e8 === 7 && i === 0 && lb !== 31) riser(t, BAR * 0.97, 0.7);
+  if (i === 0 && ((D && e8 === 0) || (id === 'outro' && lb === 0))) impact(t);
+  if (hit('pad', s)) icePad(t, PADC[ch], padDur(id, lb, i), D ? 0.07 : 0.14, (i >> 1) % 2 ? 0.45 : -0.45);
+  const tk = hit('tink', s); if (tk) tink(t, tk);
+  const k = hit('kick', s); if (k) kick(t, k, kickDur(id, lb, i));
+  const hv = hit('hat', s);
+  if (hv) {
+    hat(t, hv, i % 2 ? 0.3 : -0.3);
+    if (D && part % 2 === 1 && i === 15) hat(t + STEP / 2, 0.6, 0.3);   // ratchet into the next bar
+  }
+  if (hit('ohat', s)) ohat(t);
+  const b = hit('bass', s); if (b) bass(t, b, STEP * (BASSN[i] === 12 ? 0.6 : 0.95));
+  const a = hit('arp', s); if (a) arpNote(t, a, arpOpen(s), D ? 0.4 : 0.34, Math.sin(s * 0.7) * 0.35);
+  if (hit('tom', s)) { const p = (lb * 16 + i) / 60; tom(t, 45 + Math.round(p * 19), 0.5 + 0.4 * p); }
+  if (hit('clap', s)) clap(t);
+  if (hit('crash', s)) crash(t);
+}
+
+function schedule() {
+  if (ac.state !== 'running') return;
+  const now = ac.currentTime;
+  while (T0 + step * STEP < now + 0.15) {
+    const t = T0 + step * STEP;
+    if (t > now - 0.02) playStep(step, t); // skip steps missed while the tab was throttled
+    step++;
+  }
+}
+
+function startAudio() {
+  ac = new (window.AudioContext || window.webkitAudioContext)();
+  buildGraph();
+  T0 = ac.currentTime + 0.2; step = 0;
+  setInterval(schedule, 25); schedule();
+  master.gain.setTargetAtTime(muted ? 0.0001 : 0.9, ac.currentTime, 0.2);
+  ac.resume();
+}
+
+// offline render for checking levels without ears: __render(fromBar, bars) -> per-bar peak/rms
+window.__render = async (bar0, bars, sr = 22050) => {
+  ac = new OfflineAudioContext(2, Math.ceil((bars * BAR + 1) * sr), sr);
+  buildGraph(); master.gain.value = 0.9;
+  for (let s = bar0 * 16; s < (bar0 + bars) * 16; s++) playStep(s, 0.05 + (s - bar0 * 16) * STEP);
+  const buf = await ac.startRendering();
+  ac = null;
+  const L = buf.getChannelData(0), out = [];
+  for (let b = 0; b < bars; b++) {
+    let pk = 0, sum = 0, n = 0;
+    for (let i = Math.floor((0.05 + b * BAR) * sr); i < Math.floor((0.05 + (b + 1) * BAR) * sr); i++) { const v = Math.abs(L[i]); pk = Math.max(pk, v); sum += v * v; n++; }
+    const s = SONG[BAR_SEC[bar0 + b]];
+    out.push({ bar: bar0 + b, sec: s.id, lb: bar0 + b - s.start, peak: +pk.toFixed(3), rms: +Math.sqrt(sum / n).toFixed(3) });
+  }
+  return out;
+};
+window.__song = () => SONG.map(s => ({ id: s.id, start: s.start * BAR, bars: s.bars }));
+window.__phys = () => ({ A, E, B, PER, vPeri: vAt(COMET.peri), vAph: vAt(COMET.aph), v1: vAt(1), tPeri: tempK(COMET.peri), tAph: tempK(COMET.aph),
+  tOort: tempK(COMET.oortAU), ffOort: ffYrs(COMET.oortAU), RS, NUC_KG, LOSS_M, N_LIFE, LIFE_YRS, fallYrs: PER / 2 - tFromPeri(FROST) });
+
+function toggle() {
+  if (!ac) { startAudio(); return; }
+  if (ac.state === 'running') ac.suspend(); else ac.resume();
+}
+function toggleMute() {
+  muted = !muted;
+  if (ac) master.gain.setTargetAtTime(muted ? 0.0001 : 0.9, ac.currentTime, 0.1);
+}
+cv.addEventListener('click', toggle);
+addEventListener('keydown', e => {
+  if (e.code === 'Space') { e.preventDefault(); toggle(); }
+  else if (e.key === 'm' || e.key === 'M') toggleMute();
+});
+
+// ---------- visual envelopes, read from the same hit() table ----------
+function since(layer, t, back = 64) {
+  const s = Math.floor(t / STEP);
+  for (let k = 0; k < back; k++) if (hit(layer, s - k)) return t - (s - k) * STEP;
+  return 99;
+}
+const pulse = (layer, t, rate = 10) => Math.exp(-since(layer, t) * rate);
+const secDur = sec => sec.bars * BAR;
+const lb = lt => Math.floor(lt / BAR);
+
+// ---------- HUD: the live step sequencer ----------
+const ROWS = [['PAD', 'pad', P.pad, P.padD], ['KCK', 'kick', P.kick, P.kickD], ['HAT', 'hats', P.hat, P.hatD],
+              ['BAS', 'bass', P.bass, P.bassD], ['ARP', 'arp', P.arp, P.arpD], ['PRC', 'perc', P.perc, P.percD]];
+function hud(t) {
+  const s = Math.floor(t / STEP), b0 = s - (s % 16), cur = s % 16, y0 = 257;
+  cx.fillStyle = P.shadow; cx.fillRect(6, y0 - 1, 172, 60);
+  cx.fillStyle = P.bg; cx.fillRect(4, y0 - 3, 172, 60);
+  cx.fillStyle = P.edge;
+  cx.fillRect(4, y0 - 3, 172, 1); cx.fillRect(4, y0 + 56, 172, 1); cx.fillRect(4, y0 - 3, 1, 60); cx.fillRect(175, y0 - 3, 1, 60);
+  ROWS.forEach(([lab, layer, col, dark], r) => {
+    const y = y0 + 1 + r * 9;
+    let active = false;
+    for (let i = 0; i < 16 && !active; i++) if (hit(layer, b0 + i)) active = true;
+    text(lab, 8, y, active ? (pulse(layer, t, 8) > 0.4 ? P.fg : col) : P.edge);
+    for (let i = 0; i < 16; i++) {
+      const on = hit(layer, b0 + i), x = 22 + i * 9;
+      cx.fillStyle = on ? (i === cur ? P.white : col) : active ? P.grid : '#0a1024';
+      cx.fillRect(x, y, 8, 5);
+    }
+  });
+  cx.fillStyle = P.fg; cx.fillRect(22 + cur * 9, y0 + 55, 8, 1); // playhead
+}
+
+// big countdown over the last bar of a build; true on the silent beat
+function countdown(lt, sec, ifSilent, x = 90) {
+  const bar = lb(lt), beat = Math.floor((lt % BAR) / BEAT);
+  if (bar !== sec.bars - 1) return false;
+  if (beat === 3) { ifSilent(); return true; }
+  const n = String(3 - beat);
+  text(n, x + 2, 92, P.shadow, 6, 'c'); text(n, x, 90, P.white, 6, 'c');
+  return false;
+}
+
+// where the comet is on its orbit during each inner scene: tp = years from perihelion (negative = on the way in)
+function orbitSpan(id) {
+  if (id === 'fall') return [-PER / 2, -tFromPeri(RS[0])];
+  const k = ['frost', 'coma', 'tails', 'peri'].indexOf(id);
+  return [-tFromPeri(RS[k]), -tFromPeri(RS[k + 1])];
+}
+function orbitNow(id, lt, dur) {
+  const [a, b] = orbitSpan(id), tp = a + (b - a) * Math.min(1, lt / dur);
+  return { tp, ...posAt(tp), perBeat: (b - a) / (dur / BEAT) };
+}
+
+// ---------- scenes ----------
+const OORT = Array.from({ length: 300 }, () => {
+  const au = 2000 * Math.pow(50, rng()), u = rng() * 2 - 1;      // log-uniform in distance, uniform on a sphere
+  return { r: 34 + 50 * Math.log(au / 2000) / Math.log(50), a: rng() * 6.283, p: Math.sqrt(1 - u * u), h: rng() };
+});
+const FRAGS = Array.from({ length: 9 }, (_, k) => ({ a: k / 9 * 6.283 + rng() * 0.5, v: 0.5 + rng(), r: 2 + rng() * 4 }));
+
+function sceneTitle(lt, t, ctl) {
+  stars(t);
+  const hx = 52, hy = 182, sunA = Math.atan2(150, -150);
+  comet(hx, hy, { sunA, velA: sunA - Math.PI / 2, len: 150, ion: 1, dust: 0.9, coma: 10, ae: 0.5 + 0.3 * Math.sin(t * 3) }, t, Math.floor(t / STEP));
+  card([{ t: 'ICE', s: 3, c: P.ice }, { t: 'COMET', s: 3, c: P.arp }, { t: `TECHNO CHIP MIX - ${BPM} BPM`, c: P.dim }], 34);
+  text('6 LAYERS. 1 COMET. 1 DROP.', 90, 216, P.dim, 1, 'c');
+  const on = ((t * 2) | 0) % 2 === 0;   // song time when playing; the not-started card is passed wall-clock seconds
+  if (!ctl.started) {
+    if (on) card([{ t: 'TAP TO START', c: P.arp, s: 2 }], 250);
+    text('HEADPHONES + VOLUME UP', 90, 290, P.edge, 1, 'c');
+  } else if (on) card([{ t: 'FROM ICE TO DUST', c: P.arp }], 250);
+}
+
+function sceneCloud(lt, t, sec) {
+  stars(t);
+  const bar = lb(lt), s = Math.floor(t / STEP), pe = pulse('pad', t, 9), Y0 = 112;
+  // which flakes light up on this gate step
+  let ps = s; while (ps > s - 16 && !hit('pad', ps)) ps--;
+  OORT.forEach((o, k) => {
+    const x = X + Math.cos(o.a) * o.r * o.p, y = Y0 + Math.sin(o.a) * o.r * o.p * 0.9;
+    const lit = hash(ps * 131 + k) < 0.18;
+    cx.fillStyle = lit && pe > 0.25 ? P.pad : o.h > 0.7 ? P.dim : P.padD;
+    cx.fillRect(Math.round(x), Math.round(y), 1, 1);
+  });
+  ring(X, Y0, 34, P.padD, 1, 0.35, 0.9);
+  ditherCircle(X, Y0, 0, 3, P.kick, 0.4);
+  cx.fillStyle = P.kick; cx.fillRect(X, Y0, 1, 1);
+  // tinks: a sparkle on a random flake
+  const tk = since('tink', t);
+  if (tk < 0.5) { const o = OORT[(hash(Math.floor(t / STEP - tk / STEP)) * OORT.length) | 0], x = X + Math.cos(o.a) * o.r * o.p, y = Y0 + Math.sin(o.a) * o.r * o.p * 0.9;
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) dot(x + dx * (1 + tk * 6), y + dy * (1 + tk * 6), P.ice, 1 - tk * 2); cx.fillStyle = P.white; cx.fillRect(Math.round(x), Math.round(y), 1, 1); }
+  line(X + 3, Y0 + 3, X + 14, Y0 + 20, P.dim);
+  text('SUN + ALL PLANETS', X + 16, Y0 + 21, P.kick);
+  text('INSIDE THIS DOT', X + 16, Y0 + 28, P.dim);
+  if (bar >= 4) {   // a passing star; one flake gets nudged inward
+    const p = (lt - 4 * BAR) / (4 * BAR), sx = 200 - p * 150, sy = 44 + p * 10;
+    sun(Math.round(sx), Math.round(sy), 3, ['#ff8a6a', '#a04020', '#ff8a6a', '#ffd0c0'], t, 0.4);
+    if (sx < 150) text('PASSING STAR', Math.round(sx) - 5, Math.round(sy) + 8, '#ff8a6a', 1, 'c');
+    const r0 = 78, rr = r0 - 30 * Math.max(0, p - 0.45) ** 1.5, a = -0.5;
+    const x = X + Math.cos(a) * rr, y = Y0 + Math.sin(a) * rr;
+    if (p > 0.45) line(x, y, X + Math.cos(a) * r0, Y0 + Math.sin(a) * r0, P.ice, 0.4);
+    ditherCircle(x, y, 0, 3, P.ice, 0.5 + 0.4 * pe);
+    cx.fillStyle = P.white; cx.fillRect(Math.round(x), Math.round(y), 1, 1);
+    if (p > 0.45) text('NUDGED IN', Math.round(x) - 6, Math.round(y) + 6, P.ice, 1, 'r');
+  }
+  banner('1. OORT CLOUD', 'LAYER 1: GATED ICE PAD', P.pad);
+  const months = COMET.oortAU * 499 / 86400 / 30.44;
+  fact(bar < 4 ? ['A SHELL OF ICE AROUND THE SUN', { t: `~${fmtBig(COMET.oortN)} FROZEN COMETS`, c: P.pad }, { t: `${fmtBig(COMET.oortAU)} AU: LIGHT TAKES ${Math.round(months)} MONTHS`, c: P.dim }]
+               : ['A PASSING STAR NUDGES ONE IN', { t: `${fmtNum(tempK(COMET.oortAU))} K: BARELY ABOVE ABSOLUTE 0`, c: P.pad }, { t: `FALL TIME: ${fmtBig(ffYrs(COMET.oortAU))} YRS`, c: P.dim }], P.pad);
+  timeline('SCHEMATIC: LOG DISTANCE');
+}
+
+function sceneFall(lt, t, sec) {
+  stars(t);
+  const bar = lb(lt), ke = pulse('kick', t, 8), SY = 186, sc = (SY - 40) / COMET.aph;
+  const o = orbitNow('fall', lt, secDur(sec));
+  const toS = (ox, oy) => [X + oy * sc, SY + ox * sc];
+  // planets' orbits (to scale) and the frost line
+  for (const [r, nm] of [[5.2, 'JUPITER'], [9.5, 'SATURN'], [19.2, 'URANUS'], [30.1, 'NEPTUNE']]) {
+    if (r > COMET.aph * 1.1) continue;
+    ring(X, SY, r * sc, P.edge, 1, 0.5);
+    if (r * sc > 30) text(nm, X + 6, Math.round(SY - r * sc) + 2, P.edge);
+  }
+  ring(X, SY, FROST * sc, P.ice, 1, 0.5);
+  // the orbit itself
+  for (let k = 0; k < 400; k++) { const ea = k / 400 * 2 * Math.PI, [x, y] = toS(A * (Math.cos(ea) - E), B * Math.sin(ea)); dot(x, y, P.padD, 0.7); }
+  sun(X, SY, 3 + Math.round(ke * 2), SUN, t, 0.3 + 0.5 * ke);
+  const dk = since('kick', t);
+  if (dk < 0.4) ring(X, SY, 6 + dk * 60, P.kick, 1, 0.8 * (1 - dk / 0.4));
+  const [cxp, cyp] = toS(o.ox, o.oy);
+  // the sun's pull, flashing on the kick
+  const ga = Math.atan2(SY - cyp, X - cxp), gl = 6 + ke * 8;
+  arrow(cxp + Math.cos(ga) * 4, cyp + Math.sin(ga) * 4, cxp + Math.cos(ga) * (4 + gl), cyp + Math.sin(ga) * (4 + gl), ke > 0.5 ? P.white : P.kick);
+  ditherCircle(cxp, cyp, 0, 3, P.ice, 0.6);
+  fillCircle(Math.round(cxp), Math.round(cyp), 1, P.white);
+  text(`${fmtNum(o.r)} AU`, Math.round(cxp) - 6, Math.round(cyp) - 2, P.ice, 1, 'r');
+  banner('2. THE FALL', 'LAYER 2: TECHNO KICK', P.kick);
+  const v = vAt(o.r), T = tempK(o.r);
+  fact([{ t: bar < 4 ? 'KEPLER: SLOW WHEN FAR OUT' : 'FASTER AND FASTER IN', c: P.kick }, `SPEED: ${fmtNum(v)} KM/S`, { t: `SURFACE: ${Math.round(T)} K (${Math.round(T - 273)} C)`, c: P.pad }, { t: 'KICK = THE SUN PULLING', c: P.dim }], P.kick);
+  timeline(`TIME: 1 BEAT = ${yrsOrDays(o.perBeat)}. ORBIT TO SCALE`);
+}
+
+function sceneFrost(lt, t, sec) {
+  stars(t);
+  const bar = lb(lt), s = Math.floor(t / STEP), he = pulse('hats', t, 10), ke = pulse('kick', t, 9), Y0 = 112;
+  const o = orbitNow('frost', lt, secDur(sec)), T = tempK(o.r), sunA = Math.PI;
+  ditherCircle(X, Y0, 0, Math.round(26 + lt * 0.6), P.hatD, 0.12 + 0.1 * he);
+  jets(X, Y0, 20, t, s, sunA, P.hat, 70);
+  nucleus(X, Y0, 20, t, sunA, 1);
+  if (ke > 0.4) for (let k = 0; k < 3; k++) arrow(4, Y0 - 20 + k * 20, 14 + ke * 6, Y0 - 20 + k * 20, P.kick);
+  text('SUNLIGHT', 4, Y0 + 28, P.kick);
+  text(`${fmtNum(o.r)} AU`, 176, Y0 + 28, P.ice, 1, 'r');
+  text(`${Math.round(T)} K`, 176, Y0 + 35, P.hat, 1, 'r');
+  banner('3. FROST LINE', 'LAYER 3: METAL HATS', P.hat);
+  fact(bar < 4 ? [`INSIDE ${fmtNum(FROST)} AU THE SUN WINS:`, { t: 'ICE TURNS STRAIGHT TO GAS', c: P.hat }, { t: 'NO LIQUID: IT SUBLIMATES', c: P.dim }]
+               : [`NUCLEUS: ~${fmtNum(COMET.km)} KM OF ICE + DUST`, { t: 'DARKER THAN COAL', c: P.dim }, { t: `HAT = JET OF GAS, ~${COMET.jetKms} KM/S`, c: P.hat }], P.hat);
+  timeline(`TIME: 1 BEAT = ${yrsOrDays(o.perBeat)}. JETS SLOWED`);
+}
+
+function sceneComa(lt, t, sec) {
+  stars(t);
+  const bar = lb(lt), s = Math.floor(t / STEP), be = pulse('bass', t, 12), Y0 = 112;
+  const o = orbitNow('coma', lt, secDur(sec)), km = comaKm(o.r), rpx = 64, pxPerKm = rpx / (comaKm(RS[2]) / 2);
+  const r = Math.round(km / 2 * pxPerKm);
+  ditherCircle(X, Y0, 0, r + 8 + Math.round(be * 4), P.padD, 0.2);
+  ditherCircle(X, Y0, 0, r, P.bassD, 0.45);
+  ditherCircle(X, Y0, 0, Math.round(r * 0.6 + be * 5), P.bass, 0.3 + 0.35 * be);
+  ditherCircle(X, Y0, 0, Math.round(r * 0.25), P.bass, 0.6);
+  // bass notes ripple outward through the gas
+  for (let k = 0; k < 24; k++) {
+    if (!hit('bass', s - k)) continue;
+    const rr = 4 + (t - (s - k) * STEP) * 70;
+    if (rr < r) ring(X, Y0, rr, P.bass, 1, 0.6 * (1 - rr / r));
+  }
+  jets(X, Y0, 2, t, s, Math.PI, P.hat, 40, 12);
+  fillCircle(X, Y0, 1, P.white);
+  // Earth at the same scale
+  const er = Math.max(1, Math.round(KM_EARTH / 2 * pxPerKm)), ex = 160, ey = 186;
+  earth(ex, ey, er, t);
+  text('EARTH', ex - er - 3, ey - 2, P.arp, 1, 'r');
+  text('SAME SCALE', ex - er - 3, ey + 5, P.dim, 1, 'r');
+  banner('4. THE COMA', 'LAYER 4: OFFBEAT BASS', P.bass);
+  fact(bar < 4 ? ['GAS + DUST BILLOW OUT', { t: `A COMA ${fmtBig(km)} KM WIDE`, c: P.bass }, { t: `= ${fmtNum(km / KM_EARTH)} EARTHS, ROUND A ${fmtNum(COMET.km)} KM CORE`, c: P.dim }]
+               : ['THE GREEN GLOW IS CARBON GAS', { t: '(C2) LIT UP BY SUNLIGHT', c: P.bass }, { t: `${fmtNum(o.r)} AU FROM THE SUN`, c: P.dim }], P.bass);
+  timeline(`TIME: 1 BEAT = ${yrsOrDays(o.perBeat)}. COMA SIZE ~`);
+}
+
+function sceneTails(lt, t, sec) {
+  stars(t);
+  const bar = lb(lt), s = Math.floor(t / STEP), ae = pulse('arp', t, 10), ke = pulse('kick', t, 8), p = lt / secDur(sec);
+  const o = orbitNow('tails', lt, secDur(sec));
+  const sx = 14, sy = 186, hx = 58, hy = 150, sunA = Math.atan2(sy - hy, sx - hx);
+  sun(sx, sy, 8, SUN, t, 0.3 + 0.4 * ke);
+  // solar wind: dashes streaming out of the sun on every kick
+  for (let k = 0; k < 32; k++) {
+    if (!hit('kick', s - k)) continue;
+    const d = 12 + (t - (s - k) * STEP) * 90;
+    for (let j = 0; j < 5; j++) { const a = sunA + Math.PI + (j - 2) * 0.25; dot(sx + Math.cos(a) * d, sy + Math.sin(a) * d, P.kickD, 1 - d / 200); }
+  }
+  comet(hx, hy, { sunA, velA: sunA + Math.PI / 2, len: Math.round(60 + 70 * p), ion: 0.6 + 0.4 * p, dust: 0.5 + 0.5 * p, coma: 8, ae, be: pulse('bass', t) }, t, s);
+  const ia = sunA + Math.PI, L = 60 + 70 * p;
+  text('ION TAIL', Math.round(hx + Math.cos(ia) * L * 0.75) + 6, Math.round(hy + Math.sin(ia) * L * 0.75) - 4, P.arp);
+  if (bar >= 4) text('DUST TAIL', Math.round(hx + Math.cos(ia) * L * 0.55) + 2, Math.round(hy + Math.sin(ia) * L * 0.55) + 16, P.dust);
+  text('SUN', sx + 12, sy + 4, P.kick);
+  banner('5. TWO TAILS', 'LAYER 5: ARP LEAD', P.arp);
+  fact(bar < 4 ? ['TWO TAILS, BOTH POINT', { t: 'AWAY FROM THE SUN', c: P.arp }, { t: `ION: GAS BLOWN BY ${COMET.windKms} KM/S WIND`, c: P.dim }]
+               : [{ t: 'DUST: PUSHED BY SUNLIGHT', c: P.dust }, 'CURVES BACK ALONG ITS PATH', { t: `UP TO ${fmtBig(COMET.tailKm)} KM LONG`, c: P.dim }], P.arp);
+  timeline(`TIME: 1 BEAT = ${yrsOrDays(o.perBeat)} @ ${fmtNum(o.r)} AU`);
+}
+
+function scenePeri(lt, t, sec) {
+  const build = 3.75 * BAR, Y0 = 112, SX = 70;
+  if (countdown(lt, sec, () => {
+    sun(SX, Y0, 10, SUN, t, 1);
+    ditherCircle(SX, Y0, 10, 50, P.white, 0.4);
+    text('PERIHELION!', 90, 150, P.white, 2, 'c');
+  })) return;
+  stars(t);
+  const o = orbitNow('peri', Math.min(lt, build), build), ke = pulse('kick', t, 9), te = pulse('tom', t, 12);
+  const sc = 80 / RS[3], toS = (ox, oy) => [SX + ox * sc, Y0 - oy * sc];
+  for (let k = 0; k <= 200; k++) {   // the orbit near the sun, to scale
+    const ea = (k / 100 - 1) * 1.2 * Math.acos(clamp((1 - RS[3] / A) / E, -1, 1)), [x, y] = toS(A * (Math.cos(ea) - E), B * Math.sin(ea));
+    dot(x, y, P.padD, 0.7);
+  }
+  sun(SX, Y0, 6 + Math.round(ke * 2), SUN, t, 0.4 + 0.4 * ke);
+  const [hx, hy] = toS(o.ox, o.oy), sunA = Math.atan2(Y0 - hy, SX - hx), velA = Math.atan2(-o.vy, o.vx);
+  comet(hx, hy, { sunA, velA, len: 70, ion: 1, dust: 1, coma: 6 + Math.round(te * 4), ae: 0.5 + 0.5 * te, knot: 220 }, t, Math.floor(t / STEP));
+  if (te > 0.3) ring(hx, hy, 8 + (1 - te) * 10, P.perc, 1, te);
+  banner('6. PERIHELION', 'BUILD: TOM ROLL + RISER', P.perc);
+  const v = vAt(o.r), T = tempK(o.r);
+  fact([`CLOSEST TO THE SUN: ${fmtNum(o.r)} AU`, { t: `SPEED: ${fmtNum(v)} KM/S`, c: P.kick }, { t: `SURFACE: ${Math.round(T)} K (${Math.round(T - 273)} C)`, c: P.perc }], P.perc);
+  timeline(`ORBIT TO SCALE. REALLY ${Math.round(tFromPeri(RS[3]) * 365.25)} DAYS`);
+}
+
+// --- the drop: four 8-bar parts ---
+function kickShells(t, s, x0, y0) {
+  for (let k = 0; k < 40; k++) {
+    if (!hit('kick', s - k)) continue;
+    const dt = t - (s - k) * STEP, r = 8 + dt * 90;
+    if (r > 140) break;
+    ring(x0, y0, r, CYC[((s - k) >> 2) % CYC.length], 1, 0.7 * (1 - r / 140));
+  }
+}
+
+function dropOut(plt, t, s, e8) {
+  const ke = pulse('kick', t, 8), ae = pulse('arp', t, 10), sx = -6, sy = 112;
+  stars(t, -t * 6);
+  kickShells(t, s, sx, sy);
+  sun(sx, sy, 16, SUN, t, 0.3 + 0.4 * ke);
+  const hx = 40 + plt * 1.4, hy = 120, sunA = Math.atan2(sy - hy, sx - hx);
+  comet(hx, hy, { sunA, velA: sunA + Math.PI - 0.5, len: 130, ion: 1, dust: 1, coma: 9, ae, be: pulse('bass', t) }, t, s);
+  jets(hx, hy, 2, t, s, sunA, P.hat, 30, 10);
+  arrow(hx - 4, hy + 16, hx + 14, hy + 16, P.fg);
+  text('MOVING', Math.round(hx) - 4, Math.round(hy) + 20, P.fg);
+  return { title: '7. OUTBOUND',
+    lines: e8 < 4 ? ['ON THE WAY OUT', { t: 'THE TAIL GOES FIRST:', c: P.arp }, { t: 'IT ALWAYS POINTS AWAY FROM THE SUN', c: P.dim }]
+                  : [{ t: `BACK IN ${fmtNum(PER)} YEARS`, c: P.arp }, 'TOP SPEED WAS ' + fmtNum(vAt(COMET.peri)) + ' KM/S', { t: `SLOWS TO ${fmtNum(vAt(COMET.aph))} KM/S FAR OUT`, c: P.dim }],
+    time: 'TAIL LENGTH NOT TO SCALE' };
+}
+
+function dropMeteor(plt, t, s, e8) {
+  stars(t);
+  const ex = 116, ey = 128, er = 24, rx = 18, ry = 44;
+  // the dust stream the comet left on its orbit
+  for (let k = 0; k < 260; k++) { const u = hash(k * 3), v = hash(k * 5 + 1), x = u * 200 - 10, y = 30 + u * 150 + (v - 0.5) * 30 - ((t * 8 + k) % 6); dot(x, y, v > 0.5 ? P.dust : P.dustD, 0.5); }
+  earth(ex, ey, er, t);
+  // a meteor for every arp note and clap, streaking from the radiant and burning up in the atmosphere
+  for (let k = 0; k < 10; k++) {
+    const st = s - k, cl = hit('clap', st);
+    if (!hit('arp', st) && !cl) continue;
+    const dt = t - st * STEP, ang = hash(st * 11) * 1.4 - 0.2;
+    const tx = ex + Math.cos(Math.PI + ang) * (er + 3), ty = ey + Math.sin(Math.PI + ang) * (er + 3) - 8;
+    const sx0 = rx + (hash(st * 17) - 0.5) * 40, sy0 = ry + (hash(st * 19) - 0.5) * 30, u = Math.min(1, dt / 0.25);
+    const hxp = sx0 + (tx - sx0) * u, hyp = sy0 + (ty - sy0) * u, tl = cl ? 0.35 : 0.2, bx = sx0 + (tx - sx0) * Math.max(0, u - tl), by = sy0 + (ty - sy0) * Math.max(0, u - tl);
+    if (u < 1) { line(bx, by, hxp, hyp, cl ? P.perc : P.dust, 0.8); fillCircle(Math.round(hxp), Math.round(hyp), cl ? 1 : 0, P.white); }
+    else if (dt < 0.45) ditherCircle(tx, ty, 0, 2 + (cl ? 2 : 0), P.perc, 1 - (dt - 0.25) / 0.2);
+  }
+  ditherCircle(rx, ry, 0, 4, P.dust, 0.4);
+  text('RADIANT', rx + 6, ry - 2, P.dust);
+  return { title: '8. METEOR SHOWER',
+    lines: e8 < 4 ? ['IT LEAVES DUST ON ITS ORBIT', { t: `EARTH HITS IT AT ${COMET.meteorKms} KM/S`, c: P.perc }, { t: 'GRAINS BURN UP ~100 KM HIGH', c: P.dim }]
+                  : ['SHOOTING STARS!', { t: HALLEY ? "HALLEY'S DUST = THE ORIONIDS" : 'THE SAME NIGHTS EVERY YEAR', c: P.perc }, { t: HALLEY ? 'EVERY OCTOBER' : 'WHEN EARTH CROSSES THE TRAIL', c: P.dim }],
+    time: 'METEORS = ARP NOTES. NOT TO SCALE' };
+}
+
+function dropShrink(plt, t, s, e8) {
+  stars(t);
+  const x = Math.min(1, plt / (8 * BAR)), n = Math.max(1, Math.round(Math.pow(N_LIFE, x * 0.97))), left = 1 - n / N_LIFE;
+  const r = Math.max(4, Math.round(22 * Math.cbrt(left))), ke = pulse('kick', t, 8);
+  kickShells(t, s, X, Y);
+  ditherCircle(X, Y, 0, r + 12, P.hatD, 0.15 + 0.15 * ke);
+  jets(X, Y, r, t, s, Math.PI, P.hat, 80);
+  nucleus(X, Y, r, t, Math.PI, left);
+  text(`ORBIT ${n.toLocaleString('en-US')}`, 90, 160, P.arp, 2, 'c');
+  return { title: '9. MELTING AWAY',
+    lines: [`EVERY PASS BOILS OFF ~${fmtNum(LOSS_M)} M OF ICE`, { t: `${fmtBig(n * PER)} YEARS IN`, c: P.arp }, { t: `MASS LEFT: ${Math.max(0, Math.round(left * 100))}%`, c: P.hat }],
+    time: 'SCHEMATIC: LOG TIME' };
+}
+
+function dropBreak(plt, t, s, e8) {
+  stars(t);
+  const ke = pulse('kick', t, 8), x = plt / (8 * BAR), fade = e8 === 7 ? (plt / BAR - 7) : 0;
+  kickShells(t, s, X, Y);
+  const sunA = Math.PI;
+  FRAGS.forEach((f, k) => {
+    const d = (x < 0.12 ? 0 : (x - 0.12) * 60) * f.v, fx = X + Math.cos(f.a) * d, fy = Y + Math.sin(f.a) * d * 0.8;
+    if (fade > 0) { for (let j = 0; j < 12; j++) dot(fx + (hash(k * 40 + j) - 0.5) * (4 + fade * 30), fy + (hash(k * 41 + j) - 0.5) * (4 + fade * 30), P.dust, 1 - fade); return; }
+    comet(fx, fy, { sunA, velA: Math.PI / 2, len: 26 + f.r * 4, ion: 0.5, dust: 0.6, coma: 2 + Math.round(f.r), ae: ke }, t, s);
+    nucleus(Math.round(fx), Math.round(fy), x < 0.12 ? 0 : f.r, t + k, sunA, 0.5);
+  });
+  if (x < 0.12) nucleus(X, Y, 8, t, sunA, 0.3);
+  return { title: '10. BREAKUP',
+    lines: e8 < 4 ? ['WEAKENED, IT CAN CRACK APART', { t: 'EACH PIECE GROWS ITS OWN TAIL', c: P.arp }, { t: 'COMET 73P: 60+ PIECES (2006)', c: P.dim }]
+                  : ['OR ITS ICE JUST RUNS OUT:', { t: 'A DARK, DEAD ROCK', c: P.dim }, { t: 'ONLY THE DUST TRAIL STAYS', c: P.dust }],
+    time: 'SIZES NOT TO SCALE' };
+}
+
+const DROP_PARTS = [dropOut, dropMeteor, dropShrink, dropBreak];
+function sceneDrop(lt, t, sec) {
+  const bar = lb(lt), part = bar >> 3, e8 = bar % 8, s = Math.floor(t / STEP), beatN = Math.floor(t / BEAT);
+  const ke = pulse('kick', t, 8), ce = pulse('clap', t, 10), plt = lt - part * 8 * BAR;
+  const r = DROP_PARTS[part](plt, t, s, e8);
+  if (!CALM) ditherFill(CYC[beatN % CYC.length], 0.1 * ke);
+  if (!CALM && ce > 0.5) for (let k = 0; k < 30; k++) { cx.fillStyle = P.ice; cx.fillRect(hash(s * 50 + k) * W | 0, hash(s * 51 + k) * 240 | 0, 1, 1); } // ice glints on the clap
+  const subCol = CYC[beatN % CYC.length];
+  banner(r.title, 'ALL LAYERS: THE DROP!', subCol, subCol);
+  fact(r.lines, subCol);
+  timeline(r.time);
+}
+
+function sceneOutro(lt, t, sec) {
+  stars(t);
+  const p = lt / secDur(sec), pe = pulse('pad', t, 6), SY = 150, sc = 100 / COMET.aph;
+  // the dust trail along the orbit, glinting on the pad
+  for (let k = 0; k < 500; k++) {
+    const ea = k / 500 * 2 * Math.PI, x = X + B * Math.sin(ea) * sc * 2.2 + (hash(k) - 0.5) * 3, y = SY + A * (Math.cos(ea) - E) * sc + (hash(k + 9) - 0.5) * 3;
+    dot(x, y, hash(k * 7 + Math.floor(t * 4)) < 0.1 * pe ? P.white : P.dust, 0.5 * (1 - p * 0.5));
+  }
+  sun(X, SY, 3, SUN, t, 0.3);
+  banner('THE END', 'LAYER 1 AGAIN: ICE PAD', P.pad);
+  fact([{ t: `LIFE ON THIS ORBIT: ~${fmtBig(LIFE_YRS)} YRS`, c: P.pad }, `= ~${N_LIFE.toLocaleString('en-US')} TRIPS ROUND THE SUN`, { t: 'ITS DUST STILL FALLS AS METEORS', c: P.dust }], P.pad);
+  text('TIME HUGELY COMPRESSED', 90, 236, P.edge, 1, 'c');
+  text('TAILS + SIZES NOT TO SCALE', 90, 244, P.edge, 1, 'c');
+}
+
+const SCENES = { title: sceneTitle, cloud: sceneCloud, fall: sceneFall, frost: sceneFrost, coma: sceneComa, tails: sceneTails,
+                 peri: scenePeri, drop: sceneDrop, outro: sceneOutro };
+
+// ---------- main loop ----------
+function frame() {
+  const started = !!ac;
+  let tau = 0;
+  if (started) tau = Math.max(0, ac.currentTime - T0 - (ac.outputLatency || 0));
+  else if (DEBUG_T !== null) tau = DEBUG_T;
+  if (started || DEBUG_T !== null) draw(tau);
+  else {
+    cx.setTransform(1, 0, 0, 1, 0, 0);
+    cx.fillStyle = P.bg; cx.fillRect(0, 0, W, H);
+    sceneTitle(0, performance.now() / 1000, { started });
+  }
+  if (started && ac.state === 'suspended') card([{ t: 'PAUSED', c: P.arp, s: 2 }], 150);
+  requestAnimationFrame(frame);
+}
+
+function draw(tau) {
+  const t = tau % LOOP;
+  const bar = Math.floor(t / BAR), sec = SONG[BAR_SEC[bar]], lt = t - sec.start * BAR;
+
+  cx.setTransform(1, 0, 0, 1, 0, 0);
+  cx.fillStyle = P.bg; cx.fillRect(0, 0, W, H);
+
+  const ke = pulse('kick', t, 12), D = sec.id === 'drop';
+  if (!CALM && D && ke > 0.3) {
+    const s = Math.floor(t / STEP);
+    cx.setTransform(1, 0, 0, 1, Math.round((hash(s) - 0.5) * 4 * ke), Math.round((hash(s + 99) - 0.5) * 4 * ke));
+  }
+  if (sec.id === 'title') sceneTitle(lt, t, { started: true });
+  else SCENES[sec.id](lt, t, sec);
+  cx.setTransform(1, 0, 0, 1, 0, 0);
+  if (sec.id !== 'title') hud(t);
+
+  if (lt < 0.3 && !D && sec.k > 0) ditherFill(P.bg, 1 - lt / 0.3);
+  const pl = lt % (8 * BAR);
+  if (D && !CALM && pl < 0.3) ditherFill(P.white, 0.8 * (1 - pl / 0.3));
+}
+
+// video export (scene-to-short): one loop of frames and audio, rendered offline on the same clock
+window.__capture = {
+  duration: LOOP,
+  thumb: SONG.find(s => s.id === 'drop').start * BAR + 2 * BAR + 6 * STEP,   // two bars into the drop, between kicks (no flash)
+  frame: tau => draw(tau),
+  async audio(sr = 48000) {
+    const live = ac;
+    ac = new OfflineAudioContext(2, Math.round(LOOP * sr), sr);
+    buildGraph(); master.gain.value = 0.9;
+    for (let s = 0; s < TOTAL_STEPS; s++) playStep(s, s * STEP);
+    const buf = await ac.startRendering();
+    ac = live;
+    return { sampleRate: sr, L: buf.getChannelData(0), R: buf.getChannelData(1) };
+  },
+};
+frame();
+})();
+</script>
+</body>
+</html>

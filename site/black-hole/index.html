@@ -25,6 +25,7 @@ const BPM = num('bpm', 160, 100, 200);
 const DRIVE = num('drive', 40, 0, 100);   // distortion on kick + bass
 const BHM = num('bh', 10, 3, 60);         // black hole mass, in suns
 const CALM = q.get('calm') === '1';       // no screen shake, glitches or flashes
+const SHORT = q.get('short') === '1';     // YouTube Short: a hit on the first frame
 const DEBUG_T = q.has('t') ? parseFloat(q.get('t')) : null; // freeze visuals at t seconds (no audio)
 
 // SI constants; every number drawn on screen comes from these and STAR
@@ -414,8 +415,12 @@ let sq125, sq25, sq50, noiseBuf, T0 = 0, muted = false, step = 0;
 const RUMBLE = { core: 0.45, collapse: 0.45, nova: 0.7, horizon: 0.6, disk: 0.6, spag: 0.25, drop: 0.8, outro: 0.5 };
 
 const midi = m => 440 * Math.pow(2, (m - 69) / 12);
-const G = v => { const g = ac.createGain(); g.gain.value = v; return g; };
-const F = (type, f, Q = 0.7) => { const b = ac.createBiquadFilter(); b.type = type; b.frequency.value = f; b.Q.value = Q; return b; };
+// every node made while one step is being scheduled; all are disconnected once that step's last sound ends,
+// so finished notes don't pile up in the audio graph
+let bag = null;
+const track = n => { if (bag) bag.push(n); return n; };
+const G = v => { const g = track(ac.createGain()); g.gain.value = v; return g; };
+const F = (type, f, Q = 0.7) => { const b = track(ac.createBiquadFilter()); b.type = type; b.frequency.value = f; b.Q.value = Q; return b; };
 const chain = (...n) => { for (let i = 0; i < n.length - 1; i++) n[i].connect(n[i + 1]); return n[0]; };
 
 function pulseWave(d) {
@@ -440,7 +445,7 @@ function crunch(k, levels) {
 }
 
 function osc(wave, f, t) {
-  const o = ac.createOscillator();
+  const o = track(ac.createOscillator());
   if (typeof wave === 'string') o.type = wave; else o.setPeriodicWave(wave);
   o.frequency.setValueAtTime(f, t);
   return o;
@@ -497,8 +502,8 @@ function rumbleIR() {
 }
 
 function noise(t, dur, vol, type, f, dest, Q = 0.8) {
-  const s = ac.createBufferSource(); s.buffer = noiseBuf;
-  const b = F(type, f, Q), g = ac.createGain();
+  const s = track(ac.createBufferSource()); s.buffer = noiseBuf;
+  const b = F(type, f, Q), g = track(ac.createGain());
   g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
   chain(s, b, g, dest);
   s.start(t, Math.random() * 0.5); s.stop(t + dur + 0.03);
@@ -510,7 +515,7 @@ function kick(t, vel, dur, root) {
   const o = osc('sine', 400, t);
   o.frequency.exponentialRampToValueAtTime(140, t + 0.016);
   o.frequency.exponentialRampToValueAtTime(midi(root - 12), t + 0.1);
-  const g = ac.createGain(); env(g, t, vel, 0.002, dur, 0.55);
+  const g = track(ac.createGain()); env(g, t, vel, 0.002, dur, 0.55);
   chain(o, g, kickIn); play(o, t, dur);
   noise(t, 0.012, vel * 0.7, 'highpass', 2500, kickIn);
   duck.gain.setValueAtTime(0.3, t);
@@ -519,7 +524,7 @@ function kick(t, vel, dur, root) {
 
 // sub boom: a sine diving through the kick bus (and its rumble)
 function impact(t) {
-  const o = osc('sine', 160, t), g = ac.createGain();
+  const o = osc('sine', 160, t), g = track(ac.createGain());
   o.frequency.exponentialRampToValueAtTime(28, t + 1.4);
   env(g, t, 0.9, 0.003, 1.6, 0.2);
   chain(o, g, kickIn); play(o, t, 1.6);
@@ -528,7 +533,7 @@ function impact(t) {
 
 // rolling chip bass: pulse + triangle sub through a snapping filter, then crunched
 function bass(t, m, dur) {
-  const f = midi(m), lp = F('lowpass', 2000, 7), g = ac.createGain();
+  const f = midi(m), lp = F('lowpass', 2000, 7), g = track(ac.createGain());
   lp.frequency.setValueAtTime(2200, t); lp.frequency.exponentialRampToValueAtTime(160, t + dur);
   env(g, t, 0.8, 0.003, dur);
   chain(lp, g, bassIn);
@@ -537,7 +542,7 @@ function bass(t, m, dur) {
 
 // 303-ish acid: saw + pulse into a screaming resonant lowpass, accents hit harder and open wider
 function acid(t, m, acc, open) {
-  const f = midi(m), lp = F('lowpass', 200, 13), g = ac.createGain(), dur = STEP * 0.95;
+  const f = midi(m), lp = F('lowpass', 200, 13), g = track(ac.createGain()), dur = STEP * 0.95;
   const base = 180 + 1800 * open, peak = Math.min(base * (acc ? 5 : 2.6), 9500);
   lp.frequency.setValueAtTime(peak, t); lp.frequency.exponentialRampToValueAtTime(base, t + (acc ? 0.16 : 0.09));
   env(g, t, acc ? 0.5 : 0.32, 0.003, dur, 0.6);
@@ -547,7 +552,7 @@ function acid(t, m, acc, open) {
 
 // industrial pad: detuned pulses under a sweeping filter, one bar long
 function pad(t, notes, dur, vol) {
-  const lp = F('lowpass', 300, 5), g = ac.createGain();
+  const lp = F('lowpass', 300, 5), g = track(ac.createGain());
   lp.frequency.setValueAtTime(260, t);
   lp.frequency.linearRampToValueAtTime(1500, t + dur * 0.5);
   lp.frequency.linearRampToValueAtTime(300, t + dur);
@@ -562,7 +567,7 @@ function pad(t, notes, dur, vol) {
 
 // metallic clank: inharmonic squares + noise, sent to the echo
 function clank(t) {
-  const bp = F('bandpass', 2400, 6), g = ac.createGain();
+  const bp = F('bandpass', 2400, 6), g = track(ac.createGain());
   env(g, t, 0.35, 0.001, 0.22);
   chain(bp, g, percIn); g.connect(fxSend);
   for (const f of [587, 845, 1293]) { const o = osc(sq50, f, t); o.connect(bp); play(o, t, 0.22); }
@@ -571,7 +576,7 @@ function clank(t) {
 
 // hoover: detuned pulses that swoop up into pitch
 function hoover(t, m, dur, vol) {
-  const f = midi(m), g = ac.createGain();
+  const f = midi(m), g = track(ac.createGain());
   env(g, t, vol, 0.01, dur, 0.85);
   g.connect(leadIn);
   // detuned pair panned wide so the lead sits around the centred acid, not on top of it
@@ -579,7 +584,7 @@ function hoover(t, m, dur, vol) {
     const o = osc(w, f * mult * 0.7, t);
     o.frequency.exponentialRampToValueAtTime(f * mult, t + 0.06);
     o.detune.value = det;
-    const og = G(0.2), sp = ac.createStereoPanner(); sp.pan.value = pan;
+    const og = G(0.2), sp = track(ac.createStereoPanner()); sp.pan.value = pan;
     chain(o, og, sp, g); play(o, t, dur);
   }
   acidDuck.gain.setValueAtTime(0.5, t);
@@ -590,7 +595,7 @@ function hoover(t, m, dur, vol) {
 function chirp(t, dur) {
   const N = 512, fr = new Float32Array(N), am = new Float32Array(N), ta = chirpTau(F_START), tb = chirpTau(F_END);
   for (let k = 0; k < N; k++) { fr[k] = chirpF(ta - (ta - tb) * k / (N - 1)); am[k] = 0.35 * Math.pow(fr[k] / F_END, 2 / 3); }
-  const o = ac.createOscillator(), g = ac.createGain();
+  const o = track(ac.createOscillator()), g = track(ac.createGain());
   o.type = 'sine'; g.gain.value = 0;
   o.frequency.setValueCurveAtTime(fr, t, dur);
   g.gain.setValueCurveAtTime(am, t, dur);
@@ -602,7 +607,7 @@ function chirp(t, dur) {
 function snare(t, vol, bpf) {
   noise(t, 0.13, vol, 'bandpass', bpf, percIn, 0.9);
   const o = osc('triangle', 220, t); o.frequency.exponentialRampToValueAtTime(150, t + 0.05);
-  const g = ac.createGain(); env(g, t, vol * 0.6, 0.001, 0.08);
+  const g = track(ac.createGain()); env(g, t, vol * 0.6, 0.001, 0.08);
   chain(o, g, percIn); play(o, t, 0.08);
 }
 function clap(t) {
@@ -612,15 +617,15 @@ function clap(t) {
 const hat = (t, open) => noise(t, open ? 0.15 : 0.03, open ? 0.32 : 0.18, 'highpass', open ? 7000 : 9000, percIn);
 const crash = t => { noise(t, 1.8, 0.4, 'highpass', 4500, percIn); noise(t, 1.2, 0.2, 'bandpass', 6000, fxSend); };
 function riser(t, dur, vol) {
-  const s = ac.createBufferSource(); s.buffer = noiseBuf; s.loop = true;
-  const bp = F('bandpass', 300, 2), g = ac.createGain();
+  const s = track(ac.createBufferSource()); s.buffer = noiseBuf; s.loop = true;
+  const bp = F('bandpass', 300, 2), g = track(ac.createGain());
   bp.frequency.setValueAtTime(300, t); bp.frequency.exponentialRampToValueAtTime(9000, t + dur);
   g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(vol, t + dur - 0.01); g.gain.linearRampToValueAtTime(0.0001, t + dur);
   chain(s, bp, g, percIn); s.start(t); s.stop(t + dur + 0.02);
 }
 function blip(t) {
   for (const [f, d] of [[880, 0], [1320, 0.06]]) {
-    const o = osc(sq50, f, t + d), g = ac.createGain(); env(g, t + d, 0.08, 0.002, 0.09);
+    const o = osc(sq50, f, t + d), g = track(ac.createGain()); env(g, t + d, 0.08, 0.002, 0.09);
     chain(o, g, percIn); play(o, t + d, 0.09);
   }
 }
@@ -638,6 +643,15 @@ function kickDur(id, lb, i) {
 }
 
 function playStep(s, t) {
+  bag = [];
+  voices(s, t);
+  const nodes = bag, srcs = nodes.filter(n => typeof n.stop === 'function');
+  bag = null;
+  let left = srcs.length;
+  for (const n of srcs) n.onended = () => { if (--left === 0) for (const m of nodes) m.disconnect(); };
+}
+
+function voices(s, t) {
   const { id, lb, i } = at(s), ch = lb % 4, D = id === 'drop', e8 = lb % 8;
   if (i === 0) {
     secGain.gain.setValueAtTime(D ? 1 : 0.75, t);
@@ -645,6 +659,7 @@ function playStep(s, t) {
   }
   if (i === 0 && lb === 0 && !D && id !== 'title' && id !== 'nova' && id !== 'outro') blip(t);
   if (id === 'title' && lb === 0 && i === 0) riser(t, BAR * 2, 0.6);
+  if (SHORT && s === 0) { impact(t); kick(t, 1, 0.3, ROOT[0]); crash(t); bass(t, ROOT[0], STEP * 3); } // the Short can't open on a quiet riser
   if ((id === 'collapse' || id === 'spag') && lb === 0 && i === 0) riser(t, BAR * 3.75, 1.8);
   if (D && e8 === 7 && i === 0 && lb !== 15) riser(t, BAR * 0.97, 0.9); // no riser over the chirp
   if (i === 0 && ((D && e8 === 0) || ((id === 'nova' || id === 'outro') && lb === 0))) impact(t);
@@ -795,7 +810,7 @@ function sceneTitle(lt, t, ctl) {
   bhole(90, 150, 14, t, { rIn: 20, rOut: 64, tilt: 0.2, glow: 0.3 + 0.2 * Math.sin(t * 3) });
   card([{ t: 'BLACK', s: 3 }, { t: 'HOLE', s: 3, c: P.acid }, { t: `INDUSTRIAL CHIP MIX - ${BPM} BPM`, c: P.dim }], 34);
   text('6 LAYERS. 1 BLACK HOLE. 1 DROP.', 90, 208, P.dim, 1, 'c');
-  const on = ((performance.now() / 500) | 0) % 2 === 0;
+  const on = ((t * 2) | 0) % 2 === 0;   // song time when playing; the not-started card is passed wall-clock seconds
   if (!ctl.started) {
     if (on) card([{ t: 'TAP TO START', c: P.acid, s: 2 }], 250);
     text('BASS HEAVY: TURN IT UP', 90, 290, P.edge, 1, 'c');
@@ -1117,13 +1132,22 @@ function frame() {
   let tau = 0;
   if (started) tau = Math.max(0, ac.currentTime - T0 - (ac.outputLatency || 0));
   else if (DEBUG_T !== null) tau = DEBUG_T;
+  if (started || DEBUG_T !== null) draw(tau);
+  else {
+    cx.setTransform(1, 0, 0, 1, 0, 0);
+    cx.fillStyle = P.bg; cx.fillRect(0, 0, W, H);
+    sceneTitle(0, performance.now() / 1000, { started });
+  }
+  if (started && ac.state === 'suspended') card([{ t: 'PAUSED', c: P.acid, s: 2 }], 150);
+  requestAnimationFrame(frame);
+}
+
+function draw(tau) {
   const t = tau % LOOP;
   const bar = Math.floor(t / BAR), sec = SONG[BAR_SEC[bar]], lt = t - sec.start * BAR;
-  const showing = started || DEBUG_T !== null;
 
   cx.setTransform(1, 0, 0, 1, 0, 0);
   cx.fillStyle = P.bg; cx.fillRect(0, 0, W, H);
-  if (!showing) { sceneTitle(0, performance.now() / 1000, { started }); requestAnimationFrame(frame); return; }
 
   const ke = pulse('kick', t, 12), D = sec.id === 'drop', e8 = lb(lt) % 8;
   const shake = D && !(lb(lt) >> 3 === 1 && e8 >= 6) ? 6 : sec.id === 'nova' ? 3 : 0;
@@ -1143,9 +1167,23 @@ function frame() {
   if (!CALM && since('crash', t) < 0.05) { // one-frame negative on the crash
     cx.globalCompositeOperation = 'difference'; cx.fillStyle = P.white; cx.fillRect(0, 0, W, H); cx.globalCompositeOperation = 'source-over';
   }
-  if (started && ac.state === 'suspended') card([{ t: 'PAUSED', c: P.acid, s: 2 }], 150);
-  requestAnimationFrame(frame);
 }
+
+// video export (scene-to-short): one loop of frames and audio, rendered offline on the same clock
+window.__capture = {
+  duration: LOOP,
+  thumb: SONG.find(s => s.id === 'drop').start * BAR + 2 * BAR + 6 * STEP,   // two bars into the drop, between kicks (no flash)
+  frame: tau => draw(tau),
+  async audio(sr = 48000) {
+    const live = ac;
+    ac = new OfflineAudioContext(2, Math.round(LOOP * sr), sr);
+    buildGraph(); master.gain.value = 0.9;
+    for (let s = 0; s < TOTAL_STEPS; s++) playStep(s, s * STEP);
+    const buf = await ac.startRendering();
+    ac = live;
+    return { sampleRate: sr, L: buf.getChannelData(0), R: buf.getChannelData(1) };
+  },
+};
 frame();
 })();
 </script>
