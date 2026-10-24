@@ -65,14 +65,15 @@
   <h1>8-Bit Science</h1>
   <p class="sub">Pick an experiment. Press start inside to enable audio.</p>
   <div class="grid" id="grid"></div>
-  <footer>To add an experiment, add an entry to the <code>experiments</code> array in this file.</footer>
+  <footer>Made without <code>love</code></footer>
 </main>
 <script>
   // Each folder with its own index.html. Add new ones here.
   const experiments = [
-    { path: "binaural/", icon: "🎧", title: "Binaural Beats", desc: "How two slightly different tones in each ear create a beat inside your head." },
-    { path: "sun-lifecycle/", icon: "☀️", title: "Life of a Sun", desc: "From nebula to main sequence to red giant and beyond." },
+    // { path: "binaural/", icon: "🎧", title: "Binaural Beats", desc: "How two slightly different tones in each ear create a beat inside your head." }, // test, not requred
+    // { path: "sun-lifecycle/", icon: "☀️", title: "Life of a Sun", desc: "From nebula to main sequence to red giant and beyond." }, //test, not required
     { path: "sun-lifecycle-2/", icon: "🔊", title: "Life of a Sun: Hardcore Mix", desc: "A 150 BPM chiptune hardcore track: each layer is one phase of a star's life, then it all drops." },
+    { path: "black-hole/", icon: "🕳️", title: "Black Hole: Industrial Mix", desc: "A 160 BPM chip-industrial techno track: star, collapse, supernova, horizon, disk, then a 32-bar drop of jets, merger, Hawking glow and evaporation." },
   ];
 
   const grid = document.getElementById("grid");

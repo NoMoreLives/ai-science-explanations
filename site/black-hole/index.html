@@ -1,0 +1,1144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Black Hole: Industrial Mix</title>
+<style>
+  html,body{margin:0;height:100%;background:#020108;color:#6a66a0;font:12px monospace}
+  body{display:flex;flex-direction:column;align-items:center;justify-content:center}
+  canvas{height:min(92vh,calc(100vw*16/9));aspect-ratio:9/16;image-rendering:pixelated;cursor:pointer;background:#07060f}
+  p{margin:6px 16px 0;text-align:center}
+</style>
+</head>
+<body>
+<canvas id="c" width="180" height="320"></canvas>
+<p>click / space: play-pause &middot; m: mute &middot; headphones + volume up &middot; ?bpm=160 &amp;drive=40 &amp;bh=10 (suns) &amp;calm=1 (no shake/flash)</p>
+<script>
+(() => {
+'use strict';
+
+// ---------- config ----------
+const q = new URLSearchParams(location.search);
+const num = (k, d, lo, hi) => { const n = parseFloat(q.get(k)); return n >= lo && n <= hi ? n : d; };
+const BPM = num('bpm', 160, 100, 200);
+const DRIVE = num('drive', 40, 0, 100);   // distortion on kick + bass
+const BHM = num('bh', 10, 3, 60);         // black hole mass, in suns
+const CALM = q.get('calm') === '1';       // no screen shake, glitches or flashes
+const DEBUG_T = q.has('t') ? parseFloat(q.get('t')) : null; // freeze visuals at t seconds (no audio)
+
+// SI constants; every number drawn on screen comes from these and STAR
+const PHYS = { G: 6.674e-11, c: 2.998e8, Msun: 1.989e30, hbar: 1.0546e-34, kB: 1.3807e-23, yr: 3.156e7, g: 9.81 };
+const STAR = {
+  mass: 25,             // progenitor, in suns
+  // shells from the outside in: name, symbol, burn time (yrs), colour, radius fraction
+  shells: [['HYDROGEN', 'H', 7e6, '#6fa0ff', 1], ['HELIUM', 'HE', 7e5, '#a070ff', 0.8], ['CARBON', 'C', 600, '#ff5fa8', 0.62],
+           ['NEON', 'NE', 1, '#ff6a3a', 0.48], ['OXYGEN', 'O', 0.5, '#3df0b0', 0.36], ['SILICON', 'SI', 1 / 365.25, '#c8d0e0', 0.24],
+           ['IRON', 'FE', 0, '#ffd23f', 0.12]],
+  coreM0: 0.5,          // iron core mass when silicon burning starts
+  chandra: 1.4,         // most mass electron pressure can hold up
+  coreKm0: 2000,        // iron core radius before collapse
+  nsKm: 20,             // radius when the core bounces
+  collapseS: 0.25,      // how long the collapse really takes
+  infallKms: 70000,     // infall speed
+  bhLimit: 3,           // remnant heavier than this: black hole
+  novaSuns: 1e10,       // peak brightness, in suns
+  novaDays: 100,        // how long it stays bright
+  diskK: 1e7,           // inner disk temperature
+  spagKm0: 3000,        // where the fall starts
+  bodyM: 2,             // astronaut height
+  radFrac: 0.048,       // mass radiated as gravitational waves in an equal-mass merger
+  cmbK: 2.7,            // temperature of space
+  uniYrs: 1.38e10,
+};
+
+const GM = m => PHYS.G * m * PHYS.Msun;
+const rsKm = m => 2 * GM(m) / PHYS.c ** 2 / 1e3;                             // Schwarzschild radius
+const fIsco = m => PHYS.c ** 3 / (Math.pow(6, 1.5) * 2 * Math.PI * GM(m));   // orbital frequency at 3 Rs
+const tidalG = (m, km) => 2 * GM(m) * STAR.bodyM / (km * 1e3) ** 3 / PHYS.g; // head-to-feet stretch, in g
+const hawkK = m => PHYS.hbar * PHYS.c ** 3 / (8 * Math.PI * GM(m) * PHYS.kB);
+const evapS = m => 5120 * Math.PI * GM(m) ** 2 * m * PHYS.Msun / (PHYS.hbar * PHYS.c ** 4);
+const MF = 2 * BHM * (1 - STAR.radFrac);           // after merging with an equal twin
+const MC = BHM * Math.pow(2, -0.2);                 // chirp mass of the pair
+const TM = GM(MC) / PHYS.c ** 3;
+const chirpTau = f => 5 / 256 * Math.pow(TM, -5 / 3) * Math.pow(Math.PI * f, -8 / 3); // time left to merger at GW frequency f
+const chirpF = tau => Math.pow(5 / (256 * tau), 3 / 8) * Math.pow(TM, -5 / 8) / Math.PI;
+const F_END = 2 * fIsco(2 * BHM);                   // GW frequency when the pair reaches the ISCO
+const F_START = Math.round(Math.min(40, F_END / 3));
+const M_LAST = Math.cbrt(1 / evapS(1));             // mass (suns) with one second left to live
+
+const W = 180, H = 320, X = 90, Y = 112;
+const STEP = 60 / BPM / 4, BAR = STEP * 16, BEAT = STEP * 4;
+const CHIRP_SLOW = 2 * BAR / (chirpTau(F_START) - chirpTau(F_END));
+
+// the track: one section per stage, each introducing one layer
+const SONG = [
+  { id: 'title', bars: 2 },
+  { id: 'star', bars: 8 },      // layer 1: drone
+  { id: 'core', bars: 8 },      // layer 2: kick
+  { id: 'collapse', bars: 4 },  // layer 3: perc (snare roll build)
+  { id: 'nova', bars: 8 },      // layer 4: hoover lead
+  { id: 'horizon', bars: 8 },   // layer 5: rumble bass
+  { id: 'disk', bars: 8 },      // layer 6: acid
+  { id: 'spag', bars: 4 },      // build: kick roll
+  { id: 'drop', bars: 32 },     // everything: jets, merger, hawking glow, evaporation
+  { id: 'outro', bars: 4 },     // drone: gone
+];
+const BAR_SEC = [];
+{ let a = 0; SONG.forEach((s, k) => { s.start = a; s.k = k; a += s.bars; for (let b = 0; b < s.bars; b++) BAR_SEC.push(k); }); }
+const TOTAL_STEPS = BAR_SEC.length * 16;
+const LOOP = TOTAL_STEPS * STEP;
+
+// A minor (A3 = the disk's inner-edge orbit): Am Am F G
+const ROOT = [45, 45, 41, 43];
+const CHORDS = [[57, 60, 64], [57, 60, 64], [53, 57, 60], [55, 59, 62]];
+const RIFF = [
+  [69,0,0,69, 0,0,67,0, 69,0,0,72, 0,0,71,0],
+  [69,0,0,69, 0,0,67,0, 69,0,0,76, 0,0,74,72],
+  [65,0,0,65, 0,0,64,0, 65,0,0,69, 0,0,67,0],
+  [67,0,0,67, 0,0,71,0, 74,0,0,72, 0,71,0,67],
+];
+const ACN = [0,0,12,0, -1,15,0,12, 0,-1,10,0, 12,0,3,7]; // acid: semitones over the root, -1 = rest
+const ACC = [1,0,1,0, 0,1,0,0, 1,0,1,0, 0,1,0,1];
+
+function at(s) {
+  s = ((s % TOTAL_STEPS) + TOTAL_STEPS) % TOTAL_STEPS;
+  const bar = (s / 16) | 0, sec = SONG[BAR_SEC[bar]];
+  return { sec, id: sec.id, lb: bar - sec.start, i: s % 16 };
+}
+
+// single source of truth for what plays on step s: audio, HUD and visuals all read this
+function hit(layer, s) {
+  const { id, lb, i } = at(s), ch = lb % 4, onBeat = i % 4 === 0;
+  const D = id === 'drop', part = lb >> 3, e8 = lb % 8;
+  const roll = D && e8 === 7 && i >= 12;              // kick roll into the next 8
+  const gap = D && part === 1 && e8 >= 6;             // melodic layers step aside for the chirp
+  switch (layer) {
+    case 'drone': return (id === 'star' || (id === 'core' && lb < 4) || (D && !gap) || id === 'outro') && i === 0 ? 1 : 0;
+    case 'clank': return (id === 'star' && (i === 6 || (i === 14 && lb % 2 === 1))) || (id === 'core' && lb >= 4 && i === 14) ||
+                         (D && part >= 2 && (i === 10 || (part === 3 && i === 6))) ? 1 : 0;
+    case 'kick':
+      if (id === 'core') return lb < 2 ? (i === 0 ? 0.75 : 0) : lb < 4 ? (i % 8 === 0 ? 0.85 : 0) : (onBeat ? 1 : 0);
+      if (id === 'collapse') return lb < 2 && onBeat ? 0.9 : 0;
+      if (id === 'nova' || id === 'horizon' || id === 'disk') return onBeat ? 1 : 0;
+      if (id === 'spag') return lb < 2 ? (onBeat ? 0.9 : 0) : lb === 2 ? (i % 2 === 0 ? 0.85 : 0) : (i < 12 ? 0.6 + 0.03 * i : 0);
+      if (D) return roll || onBeat ? 1 : part === 3 && i === 14 ? 0.55 : 0;
+      return 0;
+    case 'bass': return (id === 'horizon' || id === 'disk' || (D && !roll)) && !onBeat ? ROOT[ch] : 0;
+    case 'lead': return id === 'nova' || (D && !gap) ? RIFF[ch][i] : 0;
+    case 'acid': {
+      if (!(id === 'disk' || id === 'spag' || (D && !gap)) || (id === 'spag' && lb === 3 && i >= 12)) return 0;
+      return ACN[i] < 0 ? 0 : ROOT[ch] + 12 + ACN[i];
+    }
+    case 'snare':
+      if ((id !== 'collapse' && id !== 'spag') || (lb === 3 && i >= 12)) return 0; // last beat: silence before the hit
+      return i % [4, 2, 1, 1][lb] === 0 ? (lb === 3 ? 2 : 1) : 0;
+    case 'clap': return ((id === 'disk' && lb >= 4) || D) && (i === 4 || i === 12) ? 1 : 0;
+    case 'ohat': return ((id === 'horizon' && lb >= 4) || id === 'disk' || D) && i % 4 === 2 ? 1 : 0;
+    case 'hat': return ((id === 'disk' && lb >= 4) || D) && (i % 2 === 1 || (part === 3 && D)) ? 1 : 0;
+    case 'crash': return i === 0 && ((D && e8 === 0) || ((id === 'nova' || id === 'outro') && lb === 0)) ? 1 : 0;
+    case 'perc': return hit('snare', s) || hit('clap', s) || hit('ohat', s) || hit('hat', s) || hit('clank', s);
+  }
+  return 0;
+}
+
+// acid filter opening 0..1, read by audio and the disk glow
+function acidOpen(s) {
+  const { id, lb, i } = at(s), x = (lb * 16 + i);
+  if (id === 'disk') return 0.1 + 0.7 * x / 128;
+  if (id === 'spag') return 0.6 + 0.4 * x / 64;
+  if (id === 'drop') return lb >= 24 ? 1 : 0.3 + 0.7 * (x % 128) / 128;
+  return 0.5;
+}
+
+const P = {
+  bg: '#07060f', grid: '#16133a', edge: '#3a3570', dim: '#8a86c0', fg: '#f4f1de', shadow: '#000000', white: '#ffffff', hole: '#000000',
+  drone: '#a070ff', droneD: '#3e2a7a', kick: '#ffd23f', kickD: '#7a5a10', perc: '#bfefff', percD: '#2e5a6a',
+  lead: '#ff3b4e', leadD: '#6a1424', bass: '#4d8dff', bassD: '#1c3a7a', acid: '#ff8a2a', acidD: '#7a3510',
+  cool: '#7aa8ff', hot: '#fff6c8',
+};
+// star palettes: [glow, limb, body, hot spot]
+const SUN_B = ['#6fa0ff', '#2a4a9a', '#6fa0ff', '#bcd4ff'];
+const SUN_FE = [P.kick, P.kickD, '#c9a030', P.kick];
+const CYC = [P.acid, P.lead, P.drone, P.kick, P.bass, P.perc];
+
+// ---------- canvas + gfx helpers ----------
+const cv = document.getElementById('c');
+const cx = cv.getContext('2d');
+cx.imageSmoothingEnabled = false;
+
+// 3x5 pixel font, rows top to bottom
+const FONT = {
+  A:'010 101 111 101 101', B:'110 101 110 101 110', C:'011 100 100 100 011', D:'110 101 101 101 110',
+  E:'111 100 110 100 111', F:'111 100 110 100 100', G:'011 100 101 101 011', H:'101 101 111 101 101',
+  I:'111 010 010 010 111', J:'001 001 001 101 010', K:'101 101 110 101 101', L:'100 100 100 100 111',
+  M:'101 111 111 101 101', N:'110 101 101 101 101', O:'010 101 101 101 010', P:'110 101 110 100 100',
+  Q:'010 101 101 111 011', R:'110 101 110 101 101', S:'011 100 010 001 110', T:'111 010 010 010 010',
+  U:'101 101 101 101 111', V:'101 101 101 101 010', W:'101 101 111 111 101', X:'101 101 010 101 101',
+  Y:'101 101 010 010 010', Z:'111 001 010 100 111',
+  0:'111 101 101 101 111', 1:'010 110 010 010 111', 2:'110 001 010 100 111', 3:'110 001 010 001 110',
+  4:'101 101 111 001 001', 5:'111 100 110 001 110', 6:'011 100 111 101 111', 7:'111 001 010 010 010',
+  8:'111 101 111 101 111', 9:'111 101 111 001 110',
+  '-':'000 000 111 000 000', '.':'000 000 000 000 010', ':':'000 010 000 010 000',
+  '=':'000 111 000 111 000', '+':'000 010 111 010 000', '!':'010 010 010 000 010', '?':'110 001 010 000 010',
+  '>':'100 010 001 010 100', '<':'001 010 100 010 001', '/':'001 001 010 100 100', ',':'000 000 000 010 100',
+  '(':'010 100 100 100 010', ')':'010 001 001 001 010', "'":'010 010 000 000 000', '~':'000 011 110 000 000',
+  '^':'010 101 000 000 000', '#':'101 111 101 111 101', '%':'101 001 010 100 101',
+};
+const GL = {};
+for (const k in FONT) GL[k] = FONT[k].replace(/ /g, '');
+
+const textW = (s, sc) => s.length * 4 * sc - sc;
+function text(s, x, y, col, sc = 1, align = 'l') {
+  s = String(s).toUpperCase();
+  if (align === 'c') x = Math.round(x - textW(s, sc) / 2);
+  else if (align === 'r') x -= textW(s, sc);
+  cx.fillStyle = col;
+  for (let i = 0; i < s.length; i++) {
+    const g = GL[s[i]];
+    if (!g) continue;
+    for (let k = 0; k < 15; k++) {
+      if (g[k] === '1') cx.fillRect(x + i * 4 * sc + (k % 3) * sc, y + ((k / 3) | 0) * sc, sc, sc);
+    }
+  }
+}
+
+// bordered caption box; lines = [{t, c, s}]
+function card(lines, y, cxp = 90, border = P.fg) {
+  let w = 0, h = 4;
+  for (const l of lines) { const s = l.s || 1; w = Math.max(w, textW(String(l.t), s)); h += 5 * s + 3; }
+  w += 10;
+  const x = Math.round(cxp - w / 2);
+  cx.fillStyle = P.shadow; cx.fillRect(x + 2, y + 2, w, h);
+  cx.fillStyle = P.bg;     cx.fillRect(x, y, w, h);
+  cx.fillStyle = border;
+  cx.fillRect(x, y, w, 1); cx.fillRect(x, y + h - 1, w, 1);
+  cx.fillRect(x, y, 1, h); cx.fillRect(x + w - 1, y, 1, h);
+  let ty = y + 4;
+  for (const l of lines) { const s = l.s || 1; text(l.t, cxp, ty, l.c || P.fg, s, 'c'); ty += 5 * s + 3; }
+  return h;
+}
+
+const BAYER = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
+const bay = (x, y) => BAYER[(y & 3) * 4 + (x & 3)];
+
+function fillCircle(x, y, r, col) {
+  if (r < 0) return;
+  cx.fillStyle = col;
+  for (let dy = -r; dy <= r; dy++) {
+    const dx = Math.floor(Math.sqrt((r + .5) * (r + .5) - dy * dy));
+    cx.fillRect(x - dx, y + dy, 2 * dx + 1, 1);
+  }
+}
+
+// ordered-dither ring/disc, d = 0..1 density
+function ditherCircle(x, y, r0, r1, col, d) {
+  if (d <= 0) return;
+  cx.fillStyle = col;
+  const lvl = d * 16;
+  for (let py = y - r1; py <= y + r1; py++) {
+    if (py < 0 || py >= H) continue;
+    for (let px = x - r1; px <= x + r1; px++) {
+      const dd = (px - x) ** 2 + (py - y) ** 2;
+      if (dd <= r1 * r1 && dd >= r0 * r0 && bay(px, py) < lvl) cx.fillRect(px, py, 1, 1);
+    }
+  }
+}
+
+// thin dithered ring, sampled by angle (cheap for big radii); sy squashes it into an ellipse
+function ring(x, y, r, col, th, d, sy = 1) {
+  if (d <= 0 || r < 1) return;
+  cx.fillStyle = col;
+  const lvl = d * 16, n = Math.ceil(r * 7) + 8;
+  for (let k = 0; k < n; k++) {
+    const a = k / n * 2 * Math.PI, c = Math.cos(a), s = Math.sin(a);
+    for (let j = 0; j < th; j++) {
+      const px = Math.round(x + c * (r + j)), py = Math.round(y + s * (r + j) * sy);
+      if (bay(px, py) < lvl) cx.fillRect(px, py, 1, 1);
+    }
+  }
+}
+
+function line(x0, y0, x1, y1, col, d = 1) {
+  cx.fillStyle = col;
+  const n = Math.max(Math.abs(x1 - x0), Math.abs(y1 - y0), 1);
+  for (let k = 0; k <= n; k++) {
+    const px = Math.round(x0 + (x1 - x0) * k / n), py = Math.round(y0 + (y1 - y0) * k / n);
+    if (d >= 1 || bay(px, py) < d * 16) cx.fillRect(px, py, 1, 1);
+  }
+}
+
+function arrow(x0, y0, x1, y1, col) {
+  line(x0, y0, x1, y1, col);
+  const a = Math.atan2(y1 - y0, x1 - x0);
+  for (const s of [-1, 1]) line(x1, y1, x1 + 4 * Math.cos(a + s * 2.5), y1 + 4 * Math.sin(a + s * 2.5), col);
+}
+
+// dithered pattern fills: d of a 4x4 tile in col (cached)
+const PAT = {};
+function ditherFill(col, d) {
+  const n = Math.max(0, Math.min(16, Math.round(d * 16)));
+  if (!n) return;
+  const key = col + n;
+  if (!PAT[key]) {
+    const t = document.createElement('canvas'); t.width = t.height = 4;
+    const c = t.getContext('2d'); c.fillStyle = col;
+    for (let i = 0; i < 16; i++) if (BAYER[i] < n) c.fillRect(i % 4, (i / 4) | 0, 1, 1);
+    PAT[key] = cx.createPattern(t, 'repeat');
+  }
+  cx.fillStyle = PAT[key]; cx.fillRect(0, 0, W, H);
+}
+
+function mulberry(a) { return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+const rng = mulberry(1915);
+const hash = n => { n = Math.imul(n ^ 0x5bd1e995, 0x27d4eb2d); n ^= n >>> 15; n = Math.imul(n, 0x85ebca6b); n ^= n >>> 13; return (n >>> 0) / 4294967296; };
+
+// a star: dithered corona, limb, body, hot spot and boiling granulation
+function sun(x, y, r, pal, t, glow = 0.35) {
+  r = Math.max(1, Math.round(r));
+  ditherCircle(x, y, r, Math.round(r * 1.3) + 4, pal[0], glow);
+  fillCircle(x, y, r, pal[1]);
+  if (r < 3) return;
+  fillCircle(x, y, r - 2, pal[2]);
+  fillCircle(x - Math.round(r * 0.22), y - Math.round(r * 0.22), Math.round(r * 0.5), pal[3]);
+  if (r < 6) return;
+  cx.fillStyle = pal[1];
+  const rr = (r - 2) * (r - 2), sc = 6 / r + 0.25;
+  for (let py = -r + 2; py <= r - 2; py++) {
+    for (let px = -r + 2; px <= r - 2; px++) {
+      if (px * px + py * py > rr) continue;
+      const v = Math.sin(px * sc * 1.7 + t * 1.9) * Math.sin(py * sc * 2.1 - t * 1.3) + Math.sin((px - py) * sc + t * 0.7) * 0.6;
+      if (v > 0.95 && bay(x + px, y + py) < 8) cx.fillRect(x + px, y + py, 1, 1);
+    }
+  }
+}
+
+// background stars: twinkling, lensed by a hole, or warp streaks flying out of the centre
+const STARS = Array.from({ length: 140 }, () => ({ x: rng() * W | 0, y: rng() * H | 0, a: rng() * 6.283, d: rng(), b: rng() }));
+const starCol = (k, t, s) => (k * 7 + Math.floor(t * 6)) % 11 === 0 ? P.fg : s.b > 0.6 ? P.dim : P.edge;
+function stars(t) {
+  STARS.forEach((s, k) => { cx.fillStyle = starCol(k, t, s); cx.fillRect(s.x, s.y, 1, 1); });
+}
+// point-mass lens: each star seen at (d +- sqrt(d^2 + 4 thE^2)) / 2, both images
+function lensStars(t, x0, y0, thE, sh) {
+  STARS.forEach((s, k) => {
+    const dx = s.x - x0, dy = s.y - y0, d = Math.hypot(dx, dy) || 1, qq = Math.sqrt(d * d + 4 * thE * thE);
+    cx.fillStyle = starCol(k, t, s);
+    for (const dd of [(d + qq) / 2, (d - qq) / 2]) {
+      if (Math.abs(dd) > sh + 1) cx.fillRect(Math.round(x0 + dx / d * dd), Math.round(y0 + dy / d * dd), 1, 1);
+    }
+  });
+}
+function warp(t, kick, x0 = X, y0 = Y) {
+  for (let k = 0; k < STARS.length; k++) {
+    const s = STARS[k], d = (s.d + t * (0.22 + s.b * 0.25)) % 1;
+    const r = 6 + d * d * 150, len = 1 + d * (3 + kick * 16);
+    line(x0 + Math.cos(s.a) * r, y0 + Math.sin(s.a) * r, x0 + Math.cos(s.a) * (r + len), y0 + Math.sin(s.a) * (r + len), d > 0.5 ? P.fg : P.dim);
+  }
+}
+
+// shift a few horizontal slices sideways (pixel-exact glitch)
+function glitch(seed, n) {
+  for (let j = 0; j < n; j++) {
+    const y = hash(seed * 31 + j) * (H - 60) | 0, h = 2 + (hash(seed * 17 + j) * 6 | 0);
+    const dx = Math.round((hash(seed * 7 + j) - 0.5) * 16);
+    cx.drawImage(cv, 0, y, W, h, dx, y, W, h);
+  }
+}
+
+// a black hole as seen: far side of the disk, shadow, the far side lensed over the top, photon ring, near side.
+// Inner disk orbits faster (Kepler), the approaching (right) side is brighter (Doppler beaming).
+const DISKP = Array.from({ length: 700 }, () => ({ f: rng(), a: rng() * 6.283, c: rng() }));
+function diskCol(heat, beam, c) {
+  const v = heat + 0.35 * beam;
+  return v > 0.95 ? P.white : v > 0.7 ? P.kick : v > 0.3 ? P.acid : c < 0.5 ? P.lead : P.acidD;
+}
+function dot(px, py, col, d) {
+  px = Math.round(px); py = Math.round(py);
+  if (bay(px, py) < d * 16) { cx.fillStyle = col; cx.fillRect(px, py, 1, 1); }
+}
+function bhole(x0, y0, sh, t, o = {}) {
+  const rIn = o.rIn ?? sh * 1.4, rOut = o.rOut ?? sh * 3.5, tilt = o.tilt ?? 0.22, dens = o.disk ?? 1, glow = o.glow || 0, rc = o.ring || P.fg;
+  const pts = [];
+  if (dens > 0) for (const d of DISKP) {
+    if (d.c > dens) continue;
+    const r = rIn + d.f * d.f * (rOut - rIn);
+    pts.push({ r, a: d.a + t * (o.spin ?? 1) * 5 * Math.pow(rIn / r, 1.5), c: d.c, heat: 1 - (r - rIn) / (rOut - rIn) });
+  }
+  const col = p => diskCol(p.heat + glow * 0.3 * p.heat, Math.cos(p.a), p.c);
+  for (const p of pts) if (Math.sin(p.a) < 0) dot(x0 + Math.cos(p.a) * p.r, y0 + Math.sin(p.a) * p.r * tilt, col(p), 0.6 + 0.4 * Math.cos(p.a));
+  ditherCircle(x0, y0, sh, sh + 3 + Math.round(glow * 4), rc, 0.25 + 0.5 * glow);
+  fillCircle(x0, y0, sh, P.hole);
+  for (const p of pts) {
+    const rl = sh + 2 + (p.r - rIn) * 0.3;
+    if (rl < sh + 12) dot(x0 + Math.cos(p.a) * rl, y0 + Math.sin(p.a) * rl, col(p), Math.sin(p.a) < 0 ? 0.75 : 0.3);
+  }
+  ring(x0, y0, sh + 1, rc, 1, 0.7 + 0.3 * glow);
+  for (const p of pts) if (Math.sin(p.a) >= 0) dot(x0 + Math.cos(p.a) * p.r, y0 + Math.sin(p.a) * p.r * tilt, col(p), 0.6 + 0.4 * Math.cos(p.a));
+}
+
+// ---------- text helpers ----------
+function fmtNum(v) { return v >= 10 ? String(Math.round(v)) : String(Math.round(v * 10) / 10); }
+function sci(v) {
+  if (v >= 0.1 && v < 1e4) return fmtNum(v);
+  let e = Math.floor(Math.log10(v)), m = Math.round(v / 10 ** e * 10) / 10;
+  if (m >= 10) { m = 1; e++; }
+  return (m === 1 ? '' : m + ' X ') + '10^' + e;
+}
+function fmtBig(v) {
+  if (v >= 1e12) return sci(v);
+  if (v >= 1e9) return fmtNum(v / 1e9) + ' BILLION';
+  if (v >= 1e6) return fmtNum(v / 1e6) + ' MILLION';
+  if (v >= 1e4) return fmtNum(v / 1e3) + ' THOUSAND';
+  return fmtNum(v);
+}
+function fmtDur(yrs) {
+  if (yrs >= 1) return fmtBig(yrs) + (yrs === 1 ? ' YR' : ' YRS');
+  if (yrs * 12 >= 1) return fmtNum(yrs * 12) + ' MONTHS';
+  const d = Math.round(yrs * 365.25);
+  return d + (d === 1 ? ' DAY' : ' DAYS');
+}
+const NOTES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+const noteName = f => { const m = Math.round(69 + 12 * Math.log2(f / 440)); return NOTES[m % 12] + (Math.floor(m / 12) - 1); };
+const banner = (title, sub, col, subCol = P.fg) => card([{ t: title, s: 2, c: col }, { t: sub, c: subCol }], 4, 90, col);
+const fact = (lines, border) => card(lines.map(l => typeof l === 'string' ? { t: l } : l), 200, 90, border);
+const timeline = s => text(s, 90, 244, P.dim, 1, 'c');
+
+// ---------- audio (everything synthesised) ----------
+let ac = null, master, secGain, comp, duck, kickIn, rumble, bassIn, padIn, leadIn, percIn, acidIn, fxSend, teach;
+let sq125, sq25, sq50, noiseBuf, T0 = 0, muted = false, step = 0;
+const RUMBLE = { core: 0.45, collapse: 0.45, nova: 0.7, horizon: 0.6, disk: 0.6, spag: 0.25, drop: 0.8, outro: 0.5 };
+
+const midi = m => 440 * Math.pow(2, (m - 69) / 12);
+const G = v => { const g = ac.createGain(); g.gain.value = v; return g; };
+const F = (type, f, Q = 0.7) => { const b = ac.createBiquadFilter(); b.type = type; b.frequency.value = f; b.Q.value = Q; return b; };
+const chain = (...n) => { for (let i = 0; i < n.length - 1; i++) n[i].connect(n[i + 1]); return n[0]; };
+
+function pulseWave(d) {
+  const N = 64, re = new Float32Array(N), im = new Float32Array(N);
+  for (let n = 1; n < N; n++) {
+    const a = 2 / (n * Math.PI);
+    re[n] = a * Math.sin(n * Math.PI * d) * Math.cos(n * Math.PI * d);
+    im[n] = a * Math.sin(n * Math.PI * d) ** 2;
+  }
+  return ac.createPeriodicWave(re, im);
+}
+
+// tanh saturation quantised to a few levels: the crunch
+function crunch(k, levels) {
+  const n = 4096, c = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const x = i / (n - 1) * 2 - 1, y = Math.tanh(k * x) / Math.tanh(k);
+    c[i] = Math.round(y * levels) / levels;
+  }
+  const s = ac.createWaveShaper(); s.curve = c; s.oversample = '4x';
+  return s;
+}
+
+function osc(wave, f, t) {
+  const o = ac.createOscillator();
+  if (typeof wave === 'string') o.type = wave; else o.setPeriodicWave(wave);
+  o.frequency.setValueAtTime(f, t);
+  return o;
+}
+function env(g, t, vol, atk, dur, hold) {
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.linearRampToValueAtTime(vol, t + atk);
+  if (hold) { g.gain.setValueAtTime(vol, t + dur * hold); }
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+}
+function play(o, t, dur) { o.start(t); o.stop(t + dur + 0.03); }
+
+function buildGraph() {
+  master = G(0.0001);
+  comp = ac.createDynamicsCompressor();
+  comp.threshold.value = -12; comp.knee.value = 4; comp.ratio.value = 6; comp.attack.value = 0.002; comp.release.value = 0.1;
+  secGain = G(0.75); // section level: the drop gets the headroom
+  chain(comp, secGain, master, ac.destination);
+  // sidechain bus: everything melodic (and the rumble) pumps against the kick
+  duck = G(1); duck.connect(comp);
+  // echo: dotted-eighth feedback delay, darkened
+  const dly = ac.createDelay(1); dly.delayTime.value = STEP * 3;
+  const dlp = F('lowpass', 2200), fb = G(0.4), ret = G(0.5);
+  fxSend = G(1);
+  chain(fxSend, dly, dlp, fb, dly); dlp.connect(ret); ret.connect(comp);
+  // kick: driven into the bit-crushed saturator, then the industrial rumble:
+  // the crunched kick through a dark noise reverb, lowpassed and crunched again
+  kickIn = G(1 + DRIVE / 10);
+  const kOut = G(0.6);
+  chain(kickIn, crunch(2 + DRIVE / 6, 10 + (100 - DRIVE) / 2), F('lowpass', 7000), kOut, comp);
+  const conv = ac.createConvolver(); conv.buffer = rumbleIR();
+  rumble = G(0);
+  chain(kOut, conv, F('lowpass', 160, 1.2), crunch(3, 24), rumble, duck);
+  bassIn = G(1 + DRIVE / 14);
+  chain(bassIn, crunch(1.5 + DRIVE / 9, 12 + (100 - DRIVE) / 2), F('lowpass', 2400), G(0.36), duck);
+  padIn = G(0.5); padIn.connect(duck); padIn.connect(G(0.5)).connect(fxSend);
+  leadIn = G(1); chain(leadIn, crunch(1.8, 64), F('lowpass', 4800), G(0.4), duck);
+  leadIn.connect(G(0.25)).connect(fxSend);
+  acidIn = G(1); chain(acidIn, crunch(2.2, 40), F('lowpass', 6000), G(0.34), duck);
+  acidIn.connect(G(0.2)).connect(fxSend);
+  percIn = G(0.7); percIn.connect(comp);
+  teach = G(1); teach.connect(master); // the chirp: a pure sine, no effects
+  sq125 = pulseWave(0.125); sq25 = pulseWave(0.25); sq50 = pulseWave(0.5);
+  noiseBuf = ac.createBuffer(1, ac.sampleRate, ac.sampleRate);
+  const d = noiseBuf.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+}
+
+function rumbleIR() {
+  const n = Math.floor(ac.sampleRate * 0.9), b = ac.createBuffer(1, n, ac.sampleRate), d = b.getChannelData(0);
+  for (let i = 0; i < n; i++) d[i] = (Math.random() * 2 - 1) * Math.exp(-i / ac.sampleRate / 0.18);
+  return b;
+}
+
+function noise(t, dur, vol, type, f, dest, Q = 0.8) {
+  const s = ac.createBufferSource(); s.buffer = noiseBuf;
+  const b = F(type, f, Q), g = ac.createGain();
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  chain(s, b, g, dest);
+  s.start(t, Math.random() * 0.5); s.stop(t + dur + 0.03);
+  return b;
+}
+
+// hard kick: pitch drop onto a tuned tail, body held, then into the crunch; ducks the melodic bus
+function kick(t, vel, dur, root) {
+  const o = osc('sine', 400, t);
+  o.frequency.exponentialRampToValueAtTime(140, t + 0.016);
+  o.frequency.exponentialRampToValueAtTime(midi(root - 12), t + 0.1);
+  const g = ac.createGain(); env(g, t, vel, 0.002, dur, 0.55);
+  chain(o, g, kickIn); play(o, t, dur);
+  noise(t, 0.012, vel * 0.7, 'highpass', 2500, kickIn);
+  duck.gain.setValueAtTime(0.3, t);
+  duck.gain.setTargetAtTime(1, t + 0.02, 0.07);
+}
+
+// sub boom: a sine diving through the kick bus (and its rumble)
+function impact(t) {
+  const o = osc('sine', 160, t), g = ac.createGain();
+  o.frequency.exponentialRampToValueAtTime(28, t + 1.4);
+  env(g, t, 0.9, 0.003, 1.6, 0.2);
+  chain(o, g, kickIn); play(o, t, 1.6);
+  noise(t, 0.5, 0.5, 'lowpass', 1200, percIn);
+}
+
+// rolling chip bass: pulse + triangle sub through a snapping filter, then crunched
+function bass(t, m, dur) {
+  const f = midi(m), lp = F('lowpass', 2000, 7), g = ac.createGain();
+  lp.frequency.setValueAtTime(2200, t); lp.frequency.exponentialRampToValueAtTime(160, t + dur);
+  env(g, t, 0.8, 0.003, dur);
+  chain(lp, g, bassIn);
+  for (const [w, m2] of [[sq25, 1], ['triangle', 0.5]]) { const o = osc(w, f * m2, t); o.connect(lp); play(o, t, dur); }
+}
+
+// 303-ish acid: saw + pulse into a screaming resonant lowpass, accents hit harder and open wider
+function acid(t, m, acc, open) {
+  const f = midi(m), lp = F('lowpass', 200, 13), g = ac.createGain(), dur = STEP * 0.95;
+  const base = 180 + 1800 * open, peak = Math.min(base * (acc ? 5 : 2.6), 9500);
+  lp.frequency.setValueAtTime(peak, t); lp.frequency.exponentialRampToValueAtTime(base, t + (acc ? 0.16 : 0.09));
+  env(g, t, acc ? 0.5 : 0.32, 0.003, dur, 0.6);
+  chain(lp, g, acidIn);
+  for (const [w, det] of [['sawtooth', 0], [sq25, 7]]) { const o = osc(w, f, t); o.detune.value = det; o.connect(lp); play(o, t, dur); }
+}
+
+// industrial pad: detuned pulses under a sweeping filter, one bar long
+function pad(t, notes, dur, vol) {
+  const lp = F('lowpass', 300, 5), g = ac.createGain();
+  lp.frequency.setValueAtTime(260, t);
+  lp.frequency.linearRampToValueAtTime(1500, t + dur * 0.5);
+  lp.frequency.linearRampToValueAtTime(300, t + dur);
+  g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(vol, t + 0.25);
+  g.gain.setValueAtTime(vol, t + dur - 0.2); g.gain.linearRampToValueAtTime(0.0001, t + dur);
+  chain(lp, g, padIn);
+  for (const m of notes) for (const det of [-9, 9]) {
+    const o = osc(sq50, midi(m), t); o.detune.value = det; o.connect(lp); play(o, t, dur);
+  }
+  const sub = osc('triangle', midi(notes[0] - 24), t); sub.connect(lp); play(sub, t, dur);
+}
+
+// metallic clank: inharmonic squares + noise, sent to the echo
+function clank(t) {
+  const bp = F('bandpass', 2400, 6), g = ac.createGain();
+  env(g, t, 0.35, 0.001, 0.22);
+  chain(bp, g, percIn); g.connect(fxSend);
+  for (const f of [587, 845, 1293]) { const o = osc(sq50, f, t); o.connect(bp); play(o, t, 0.22); }
+  noise(t, 0.08, 0.3, 'bandpass', 3000, fxSend, 3);
+}
+
+// hoover: detuned pulses that swoop up into pitch
+function hoover(t, m, dur, vol) {
+  const f = midi(m), g = ac.createGain();
+  env(g, t, vol, 0.01, dur, 0.85);
+  g.connect(leadIn);
+  for (const [w, mult, det] of [[sq25, 1, -16], [sq25, 1, 16], [sq50, 0.5, 0], ['sawtooth', 1, 5]]) {
+    const o = osc(w, f * mult * 0.7, t);
+    o.frequency.exponentialRampToValueAtTime(f * mult, t + 0.06);
+    o.detune.value = det;
+    const og = G(0.2); chain(o, og, g); play(o, t, dur);
+  }
+}
+
+// the merger chirp at real pitch: Newtonian f(tau), slowed by CHIRP_SLOW, amplitude ~ f^(2/3), then a quick ringdown
+function chirp(t, dur) {
+  const N = 512, fr = new Float32Array(N), am = new Float32Array(N), ta = chirpTau(F_START), tb = chirpTau(F_END);
+  for (let k = 0; k < N; k++) { fr[k] = chirpF(ta - (ta - tb) * k / (N - 1)); am[k] = 0.35 * Math.pow(fr[k] / F_END, 2 / 3); }
+  const o = ac.createOscillator(), g = ac.createGain();
+  o.type = 'sine'; g.gain.value = 0;
+  o.frequency.setValueCurveAtTime(fr, t, dur);
+  g.gain.setValueCurveAtTime(am, t, dur);
+  g.gain.setValueAtTime(am[N - 1], t + dur + 0.001);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur + 0.25);
+  chain(o, g, teach); o.start(t); o.stop(t + dur + 0.3);
+}
+
+function snare(t, vol, bpf) {
+  noise(t, 0.13, vol, 'bandpass', bpf, percIn, 0.9);
+  const o = osc('triangle', 220, t); o.frequency.exponentialRampToValueAtTime(150, t + 0.05);
+  const g = ac.createGain(); env(g, t, vol * 0.6, 0.001, 0.08);
+  chain(o, g, percIn); play(o, t, 0.08);
+}
+function clap(t) {
+  for (const d of [0, 0.011, 0.022]) noise(t + d, d === 0.022 ? 0.16 : 0.012, 0.55, 'bandpass', 1500, percIn, 1.2);
+  noise(t + 0.022, 0.18, 0.15, 'bandpass', 1500, fxSend, 1.2);
+}
+const hat = (t, open) => noise(t, open ? 0.15 : 0.03, open ? 0.32 : 0.18, 'highpass', open ? 7000 : 9000, percIn);
+const crash = t => { noise(t, 1.8, 0.4, 'highpass', 4500, percIn); noise(t, 1.2, 0.2, 'bandpass', 6000, fxSend); };
+function riser(t, dur, vol) {
+  const s = ac.createBufferSource(); s.buffer = noiseBuf; s.loop = true;
+  const bp = F('bandpass', 300, 2), g = ac.createGain();
+  bp.frequency.setValueAtTime(300, t); bp.frequency.exponentialRampToValueAtTime(9000, t + dur);
+  g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(vol, t + dur - 0.01); g.gain.linearRampToValueAtTime(0.0001, t + dur);
+  chain(s, bp, g, percIn); s.start(t); s.stop(t + dur + 0.02);
+}
+function blip(t) {
+  for (const [f, d] of [[880, 0], [1320, 0.06]]) {
+    const o = osc(sq50, f, t + d), g = ac.createGain(); env(g, t + d, 0.08, 0.002, 0.09);
+    chain(o, g, percIn); play(o, t + d, 0.09);
+  }
+}
+
+function leadDur(ch, i) {
+  let n = 1;
+  while (i + n < 16 && !RIFF[ch][i + n]) n++;
+  return n * STEP - 0.012;
+}
+function kickDur(id, lb, i) {
+  if (id === 'core') return lb < 4 ? 0.7 : BEAT * 0.7; // solo: long hard tails
+  if (id === 'spag' && lb >= 2) return lb === 2 ? STEP * 1.8 : STEP * 0.9;
+  if (id === 'drop' && i % 4) return STEP * 0.9;
+  return 0.24; // short enough to leave room for the rumble and the rolling bass
+}
+
+function playStep(s, t) {
+  const { id, lb, i } = at(s), ch = lb % 4, D = id === 'drop', e8 = lb % 8;
+  if (i === 0) {
+    secGain.gain.setValueAtTime(D ? 1 : 0.75, t);
+    rumble.gain.setValueAtTime(RUMBLE[id] || 0, t);
+  }
+  if (i === 0 && lb === 0 && !D && id !== 'title' && id !== 'nova' && id !== 'outro') blip(t);
+  if (id === 'title' && lb === 0 && i === 0) riser(t, BAR * 2, 0.6);
+  if ((id === 'collapse' || id === 'spag') && lb === 0 && i === 0) riser(t, BAR * 3.75, 1.8);
+  if (D && e8 === 7 && i === 0 && lb !== 15) riser(t, BAR * 0.97, 0.9); // no riser over the chirp
+  if (i === 0 && ((D && e8 === 0) || ((id === 'nova' || id === 'outro') && lb === 0))) impact(t);
+  if (D && lb === 14 && i === 0) chirp(t, 2 * BAR);
+  if (hit('drone', s)) pad(t, CHORDS[ch], BAR + 0.25, D ? 0.09 : 0.12);
+  if (hit('clank', s)) clank(t);
+  const k = hit('kick', s); if (k) kick(t, k, kickDur(id, lb, i), ROOT[ch]);
+  const b = hit('bass', s); if (b) bass(t, b, STEP * 0.95);
+  const l = hit('lead', s); if (l) hoover(t, l, leadDur(ch, i), D ? 0.7 : 0.5);
+  const a = hit('acid', s); if (a) acid(t, a, ACC[i], acidOpen(s));
+  const sn = hit('snare', s);
+  if (sn) {
+    const p = (lb * 16 + i) / 60;
+    snare(t, 0.7 + 1.0 * p, 1200 + 3200 * p);
+    if (sn === 2) snare(t + STEP / 2, 0.7 + 1.0 * p, 1200 + 3200 * p);
+  }
+  if (hit('clap', s)) clap(t);
+  if (hit('ohat', s)) hat(t, true);
+  if (hit('hat', s)) hat(t, false);
+  if (hit('crash', s)) crash(t);
+}
+
+function schedule() {
+  if (ac.state !== 'running') return;
+  const now = ac.currentTime;
+  while (T0 + step * STEP < now + 0.15) {
+    const t = T0 + step * STEP;
+    if (t > now - 0.02) playStep(step, t); // skip steps missed while the tab was throttled
+    step++;
+  }
+}
+
+function startAudio() {
+  ac = new (window.AudioContext || window.webkitAudioContext)();
+  buildGraph();
+  T0 = ac.currentTime + 0.2; step = 0;
+  setInterval(schedule, 25); schedule();
+  master.gain.setTargetAtTime(muted ? 0.0001 : 0.9, ac.currentTime, 0.2);
+  ac.resume();
+}
+
+// offline render for checking levels without ears: __render(fromBar, bars) -> per-bar peak/rms
+window.__render = async (bar0, bars, sr = 22050) => {
+  ac = new OfflineAudioContext(2, Math.ceil((bars * BAR + 1) * sr), sr);
+  buildGraph(); master.gain.value = 0.9;
+  for (let s = bar0 * 16; s < (bar0 + bars) * 16; s++) playStep(s, 0.05 + (s - bar0 * 16) * STEP);
+  const buf = await ac.startRendering();
+  ac = null;
+  const L = buf.getChannelData(0), out = [];
+  for (let b = 0; b < bars; b++) {
+    let pk = 0, sum = 0, n = 0;
+    for (let i = Math.floor((0.05 + b * BAR) * sr); i < Math.floor((0.05 + (b + 1) * BAR) * sr); i++) { const v = Math.abs(L[i]); pk = Math.max(pk, v); sum += v * v; n++; }
+    const s = SONG[BAR_SEC[bar0 + b]];
+    out.push({ bar: bar0 + b, sec: s.id, lb: bar0 + b - s.start, peak: +pk.toFixed(3), rms: +Math.sqrt(sum / n).toFixed(3) });
+  }
+  return out;
+};
+window.__song = () => SONG.map(s => ({ id: s.id, start: s.start * BAR, bars: s.bars }));
+window.__phys = () => ({ rsKm: rsKm(BHM), fIsco: fIsco(BHM), note: noteName(fIsco(BHM)), F_START, F_END, CHIRP_SLOW, MF,
+  hawkK: hawkK(MF), evapYrs: evapS(MF) / PHYS.yr, lastKg: M_LAST * PHYS.Msun, lastK: hawkK(M_LAST) });
+
+function toggle() {
+  if (!ac) { startAudio(); return; }
+  if (ac.state === 'running') ac.suspend(); else ac.resume();
+}
+function toggleMute() {
+  muted = !muted;
+  if (ac) master.gain.setTargetAtTime(muted ? 0.0001 : 0.9, ac.currentTime, 0.1);
+}
+cv.addEventListener('click', toggle);
+addEventListener('keydown', e => {
+  if (e.code === 'Space') { e.preventDefault(); toggle(); }
+  else if (e.key === 'm' || e.key === 'M') toggleMute();
+});
+
+// ---------- visual envelopes, read from the same hit() table ----------
+function since(layer, t, back = 64) {
+  const s = Math.floor(t / STEP);
+  for (let k = 0; k < back; k++) if (hit(layer, s - k)) return t - (s - k) * STEP;
+  return 99;
+}
+const pulse = (layer, t, rate = 10) => Math.exp(-since(layer, t) * rate);
+const secDur = sec => sec.bars * BAR;
+const lb = lt => Math.floor(lt / BAR);
+
+// ---------- HUD: the live step sequencer ----------
+const ROWS = [['DRN', 'drone', P.drone, P.droneD], ['KCK', 'kick', P.kick, P.kickD], ['PRC', 'perc', P.perc, P.percD],
+              ['LED', 'lead', P.lead, P.leadD], ['BAS', 'bass', P.bass, P.bassD], ['ACD', 'acid', P.acid, P.acidD]];
+function hud(t) {
+  const s = Math.floor(t / STEP), b0 = s - (s % 16), cur = s % 16, y0 = 257;
+  cx.fillStyle = P.shadow; cx.fillRect(6, y0 - 1, 172, 60);
+  cx.fillStyle = P.bg; cx.fillRect(4, y0 - 3, 172, 60);
+  cx.fillStyle = P.edge;
+  cx.fillRect(4, y0 - 3, 172, 1); cx.fillRect(4, y0 + 56, 172, 1); cx.fillRect(4, y0 - 3, 1, 60); cx.fillRect(175, y0 - 3, 1, 60);
+  ROWS.forEach(([lab, layer, col, dark], r) => {
+    const y = y0 + 1 + r * 9;
+    const held = layer === 'drone' && hit('drone', b0);
+    let active = held;
+    for (let i = 0; i < 16 && !active; i++) if (hit(layer, b0 + i)) active = true;
+    text(lab, 8, y, active ? (pulse(layer, t, 8) > 0.4 || held ? P.fg : col) : P.edge);
+    for (let i = 0; i < 16; i++) {
+      const on = hit(layer, b0 + i), x = 22 + i * 9;
+      cx.fillStyle = on ? (i === cur ? P.white : col) : held ? dark : active ? P.grid : '#0e0c22';
+      cx.fillRect(x, y, 8, 5);
+    }
+  });
+  cx.fillStyle = P.fg; cx.fillRect(22 + cur * 9, y0 + 55, 8, 1); // playhead
+}
+
+// big countdown over the last bar of a build; true on the silent beat
+function countdown(lt, sec, ifSilent, x = 90) {
+  const bar = lb(lt), beat = Math.floor((lt % BAR) / BEAT);
+  if (bar !== sec.bars - 1) return false;
+  if (beat === 3) { ifSilent(); return true; }
+  const n = String(3 - beat);
+  text(n, x + 2, 92, P.shadow, 6, 'c'); text(n, x, 90, P.white, 6, 'c');
+  return false;
+}
+
+// ---------- scenes ----------
+const DEBRIS = Array.from({ length: 220 }, () => ({ a: rng() * 6.283, v: rng(), c: rng() }));
+const INFALL = Array.from({ length: 140 }, () => ({ a: rng() * 6.283, o: rng(), v: 0.6 + rng() * 0.8, c: rng() }));
+const ASTRO = ['01110', '01110', '00100', '11111', '10101', '00100', '01010', '01010', '11011'];
+
+// light paths past a black hole, integrated exactly: u'' + u = 1.5 u^2 (u = Rs/r, angle phi)
+const RS_PX = 10, B_CRIT = 1.5 * Math.sqrt(3);
+const RAYS = [1.5, 2.25, 2.5, 2.7, 3.2, 4.4, 6.4].flatMap(b => [-1, 1].map(sg => tracePath(b, sg)));
+function tracePath(b, sg) {
+  let u = 1 / 14, phi = Math.asin(b * u), du = Math.sqrt(Math.max(0, 1 / (b * b) - u * u + u ** 3));
+  const pts = [], h = 0.004, acc = v => -v + 1.5 * v * v;
+  let len = 0, px = null, py = null, out = false;
+  for (let n = 0; n < 5000; n++) {
+    const r = 1 / u, x = X - r * Math.cos(phi) * RS_PX, y = Y - sg * r * Math.sin(phi) * RS_PX;
+    if (px !== null) len += Math.hypot(x - px, y - py);
+    pts.push([x, y, len]); px = x; py = y;
+    if (u >= 1) break;
+    if (du < 0) out = true;
+    if (out && u < 1 / 14) break;
+    const k1u = du, k1v = acc(u), k2u = du + h / 2 * k1v, k2v = acc(u + h / 2 * k1u);
+    const k3u = du + h / 2 * k2v, k3v = acc(u + h / 2 * k2u), k4u = du + h * k3v, k4v = acc(u + h * k3u);
+    u += h / 6 * (k1u + 2 * k2u + 2 * k3u + k4u); du += h / 6 * (k1v + 2 * k2v + 2 * k3v + k4v); phi += h;
+  }
+  return { b, pts, captured: b < B_CRIT, len };
+}
+
+function sceneTitle(lt, t, ctl) {
+  lensStars(t, 90, 150, 22, 14);
+  bhole(90, 150, 14, t, { rIn: 20, rOut: 64, tilt: 0.2, glow: 0.3 + 0.2 * Math.sin(t * 3) });
+  card([{ t: 'BLACK', s: 3 }, { t: 'HOLE', s: 3, c: P.acid }, { t: `INDUSTRIAL CHIP MIX - ${BPM} BPM`, c: P.dim }], 34);
+  text('6 LAYERS. 1 BLACK HOLE. 1 DROP.', 90, 208, P.dim, 1, 'c');
+  const on = ((performance.now() / 500) | 0) % 2 === 0;
+  if (!ctl.started) {
+    if (on) card([{ t: 'TAP TO START', c: P.acid, s: 2 }], 250);
+    text('BASS HEAVY: TURN IT UP', 90, 290, P.edge, 1, 'c');
+  } else if (on) card([{ t: 'FROM STAR TO NOTHING', c: P.acid }], 250);
+}
+
+function sceneStar(lt, t, sec) {
+  stars(t);
+  const bar = lb(lt), n = Math.min(STAR.shells.length, bar + 1), R = 62, Y0 = 110;
+  const bf = (lt % BAR) / BAR, glow = 0.5 + 0.5 * Math.sin(Math.PI * bf), ce = pulse('clank', t, 7);
+  sun(X, Y0, R, SUN_B, t, 0.2 + 0.2 * glow);
+  for (let k = 1; k < n; k++) {
+    const [, , , col, fr] = STAR.shells[k], r = Math.round(R * fr);
+    fillCircle(X, Y0, r, col);
+    ring(X, Y0, r, P.bg, 1, 0.5 + 0.3 * glow);
+    if (k === bar && bf < 0.25) ditherCircle(X, Y0, r - 3, r + 3, P.white, 1 - bf / 0.25);
+  }
+  if (ce > 0.4) ring(X, Y0, R + 4 + Math.round((1 - ce) * 10), P.drone, 1, ce);
+  // legend: each shell's symbol in its colour, lit once it exists
+  const syms = STAR.shells.map(sh => sh[1]), lw = textW(syms.join(' '), 1);
+  let lx = Math.round(90 - lw / 2);
+  cx.fillStyle = P.bg; cx.fillRect(lx - 3, 179, lw + 6, 11);
+  STAR.shells.forEach(([, sym, , col], k) => { text(sym, lx, 182, k < n ? col : P.edge); lx += textW(sym, 1) + 4; });
+  banner('1. MASSIVE STAR', 'LAYER 1: INDUSTRIAL DRONE', P.drone);
+  const [name, , yrs, col] = STAR.shells[Math.min(bar, STAR.shells.length - 1)];
+  if (bar === 0) fact([`A STAR OF ${STAR.mass} SUNS`, { t: `${name} BURNS ${fmtDur(yrs)}`, c: col }], P.drone);
+  else if (bar < 6) fact(['FUSION BUILDS HEAVIER ATOMS', { t: `${name} BURNS ${fmtDur(yrs)}`, c: col }, { t: 'EACH STAGE FASTER', c: P.dim }], P.drone);
+  else fact([{ t: 'IRON PILES UP IN THE CORE', c: P.kick }, "IRON CAN'T FUSE FOR ENERGY", { t: 'THE FIRE GOES OUT', c: P.dim }], P.drone);
+  timeline('TIME: 1 BAR = 1 STAGE, EACH FASTER');
+}
+
+function sceneCore(lt, t, sec) {
+  stars(t);
+  const bar = lb(lt), dur = secDur(sec), ke = pulse('kick', t, 9), p = lt / dur, Y0 = 100;
+  const m = STAR.coreM0 + (STAR.chandra - STAR.coreM0) * p;
+  ditherCircle(X, Y0, 0, 62, STAR.shells[4][3], 0.18);
+  ditherCircle(X, Y0, 0, 44, STAR.shells[5][3], 0.3);
+  const r = Math.round(8 + 26 * (m - STAR.coreM0) / (STAR.chandra - STAR.coreM0) - 2 * ke);
+  sun(X, Y0, r, SUN_FE, t, 0.2 + 0.5 * ke);
+  const dk = since('kick', t);
+  if (dk < 0.35) ring(X, Y0, r + 4 + dk * 60, P.kick, 1, 1 - dk / 0.35);
+  for (let k = 0; k < 8; k++) {   // gravity squeezing in, harder on every kick
+    const a = k * Math.PI / 4 + Math.PI / 8, push = ke * 6, r0 = r + 26 - push, r1 = r + 8 - push;
+    arrow(X + Math.cos(a) * r0, Y0 + Math.sin(a) * r0, X + Math.cos(a) * r1, Y0 + Math.sin(a) * r1, ke > 0.5 ? P.white : P.kick);
+  }
+  // mass gauge with the limit marked
+  const bx = 30, bw = 120, full = 1.6, lx = bx + Math.round(bw * STAR.chandra / full), near = m > STAR.chandra * 0.95;
+  cx.fillStyle = P.grid; cx.fillRect(bx, 178, bw, 3);
+  cx.fillStyle = near && ((t * 8) | 0) % 2 ? P.white : P.kick; cx.fillRect(bx, 178, Math.round(bw * m / full), 3);
+  cx.fillStyle = P.lead; cx.fillRect(lx, 175, 1, 9);
+  text(`LIMIT ${STAR.chandra}`, lx, 168, P.lead, 1, 'c');
+  text(`IRON CORE: ${m.toFixed(2)} SUNS`, 90, 186, P.dim, 1, 'c');
+  banner('2. IRON CORE', 'LAYER 2: DISTORTED KICK', P.kick);
+  fact(bar < 4 ? ['SILICON FUSES INTO IRON', { t: 'KICK = GRAVITY SQUEEZING', c: P.kick }]
+               : ['ONLY ELECTRON PRESSURE', `HOLDS IT UP, TO ${STAR.chandra} SUNS`, { t: near ? 'LIMIT REACHED!' : 'GRAVITY KEEPS SQUEEZING', c: near ? P.lead : P.kick }], P.kick);
+  timeline(`TIME: 1 BEAT = ${Math.round(STAR.shells[5][2] * 365.25 * 1440 / (sec.bars * 4))} MINUTES`);
+}
+
+function sceneCollapse(lt, t, sec) {
+  const build = 3.75 * BAR, p = Math.min(1, lt / build), Y0 = 106;
+  if (countdown(lt, sec, () => {
+    fillCircle(X, Y0, 2, P.white);
+    ditherCircle(X, Y0, 2, 8, P.perc, 0.5);
+    text('BOUNCE!', 90, 140, P.white, 2, 'c');
+  })) return;
+  stars(t);
+  const se = pulse('snare', t, 16), rkm = STAR.nsKm + (STAR.coreKm0 - STAR.nsKm) * Math.pow(1 - p, 2 / 3);
+  const r = Math.max(2, Math.round(34 * rkm / STAR.coreKm0));
+  for (const f of INFALL) {   // outer layers raining in
+    const u = (lt * 0.5 * f.v + f.o) % 1, rr = r + 4 + (88 - r) * (1 - u) * (1 - u), len = 2 + u * 10 + se * 4;
+    line(X + Math.cos(f.a) * rr, Y0 + Math.sin(f.a) * rr, X + Math.cos(f.a) * (rr + len), Y0 + Math.sin(f.a) * (rr + len), f.c < 0.5 ? STAR.shells[5][3] : STAR.shells[4][3], 0.75);
+  }
+  sun(X, Y0, r, SUN_FE, t, 0.3 + 0.5 * se);
+  for (let k = 0; k < 8; k++) {
+    const a = k * Math.PI / 4 + t * 2, r0 = r + 30 - se * 8, r1 = r + 6;
+    arrow(X + Math.cos(a) * r0, Y0 + Math.sin(a) * r0, X + Math.cos(a) * r1, Y0 + Math.sin(a) * r1, se > 0.5 ? P.white : P.perc);
+  }
+  banner('3. CORE COLLAPSE', 'LAYER 3: SNARE ROLL', P.perc);
+  const pct = Math.round(STAR.infallKms / (PHYS.c / 1e3) * 100);
+  fact([{ t: `CORE RADIUS: ${Math.round(rkm)} KM`, c: P.kick }, `FALLS IN AT ${STAR.infallKms} KM/S`, { t: `= ${pct}% OF LIGHT SPEED`, c: P.perc }], P.perc);
+  timeline(`SLOWED ${Math.round(build / STAR.collapseS)}X: REALLY ${STAR.collapseS} S`);
+  if (!CALM && se > 0.6 && p > 0.4) glitch(Math.floor(t / STEP), 2 + (p * 4 | 0));
+}
+
+function sceneNova(lt, t, sec) {
+  stars(t);
+  const bar = lb(lt), le = pulse('lead', t, 6), ke = pulse('kick', t, 9), R = 6 + 120 * (1 - Math.exp(-lt / 2.5)), Y0 = 108;
+  ditherCircle(X, Y0, 0, Math.round(R), P.leadD, 0.18 + 0.1 * le);
+  for (const d of DEBRIS) {
+    const rr = R * (0.45 + 0.55 * d.v), len = 2 + le * 6 + (1 - d.v) * 3;
+    line(X + Math.cos(d.a) * rr, Y0 + Math.sin(d.a) * rr, X + Math.cos(d.a) * (rr + len), Y0 + Math.sin(d.a) * (rr + len),
+         d.c < 0.4 ? P.lead : d.c < 0.7 ? P.acid : d.c < 0.9 ? P.kick : P.perc, 0.8);
+  }
+  ring(X, Y0, Math.round(R), P.lead, 3, 0.9);
+  ring(X, Y0, Math.round(R) - 5, P.kick, 1, 0.5 + 0.5 * le);
+  if (bar < 4) {
+    sun(X, Y0, 3 + ke * 2, [P.cool, P.white, P.white, P.white], t, 0.6);
+  } else {
+    bhole(X, Y0, 4, t, { disk: 0, ring: P.bass, glow: ke });
+    text('BLACK HOLE', X + 10, Y0 + 8, P.bass);
+  }
+  banner('4. SUPERNOVA', 'LAYER 4: HOOVER LEAD', P.lead);
+  fact(bar < 4 ? ['THE STAR BLOWS ITSELF APART', { t: `BRIGHTER THAN ${fmtBig(STAR.novaSuns)} SUNS`, c: P.lead }, { t: 'FORGING GOLD, URANIUM...', c: P.kick }]
+               : ['THE LEFTOVER CORE IS', { t: `OVER ${STAR.bhLimit} SUNS: TOO HEAVY`, c: P.kick }, { t: 'IT BECOMES A BLACK HOLE', c: P.bass }], P.lead);
+  timeline(`TIME: 1 BEAT = ${Math.round(STAR.novaDays / (sec.bars * 4))} DAYS`);
+}
+
+function sceneHorizon(lt, t, sec) {
+  const bar = lb(lt), be = pulse('bass', t, 14), ke = pulse('kick', t, 9);
+  lensStars(t, X, Y, 26, 26);
+  ring(X, Y, Math.round(B_CRIT * RS_PX), P.edge, 1, 0.5);       // shadow edge
+  ring(X, Y, 1.5 * RS_PX, P.bassD, 1, 0.6);                      // photon sphere
+  // the paths, faint, then photons racing along them once per bar
+  const head = (lt % BAR) / BAR * 300;
+  for (const r of RAYS) {
+    for (const [x, y, l] of r.pts) {
+      if (x < 0 || x >= W || y < 34 || y > 196) continue;
+      const age = head - l;
+      if (age >= 0 && age < 36) dot(x, y, age < 2 ? P.white : P.bass, 1 - age / 40);
+      else dot(x, y, r.captured ? P.bassD : P.grid, 0.5);
+    }
+    if (r.captured && head > r.len && head - r.len < 20) ditherCircle(X, Y, RS_PX, RS_PX + 4, P.bass, 1 - (head - r.len) / 20);
+  }
+  fillCircle(X, Y, RS_PX, P.hole);
+  ring(X, Y, RS_PX, ke > 0.5 ? P.white : P.bass, 1, 0.6 + 0.4 * be);
+  line(X + 8, Y + 8, X + 26, Y + 50, P.dim);
+  text('HORIZON', X + 22, Y + 52, P.fg);
+  text(`R = ${fmtNum(rsKm(BHM))} KM`, X + 22, Y + 59, P.bass);
+  text('PHOTON SPHERE', X + 18, Y - 30, P.dim);
+  line(X + 16, Y - 24, X + 11, Y - 11, P.dim);
+  banner('5. EVENT HORIZON', 'LAYER 5: RUMBLE BASS', P.bass);
+  fact(bar < 4 ? [`${BHM} SUNS IN A BALL ${Math.round(2 * rsKm(BHM))} KM WIDE`, { t: 'NOTHING GETS OUT,', c: P.bass }, { t: 'NOT EVEN LIGHT', c: P.bass }]
+               : ['LIGHT PASSING CLOSE BENDS', { t: `CLOSER THAN ${fmtNum(B_CRIT)} RS: CAPTURED`, c: P.bass }, { t: 'BLACK = THE SHADOW', c: P.dim }], P.bass);
+  timeline('SCHEMATIC: EXACT LIGHT PATHS, SLOWED');
+}
+
+function sceneDisk(lt, t, sec) {
+  stars(t);
+  const bar = lb(lt), s = Math.floor(t / STEP), ae = pulse('acid', t, 12), ke = pulse('kick', t, 9), X0 = 102, Y0 = 118;
+  // companion star feeding a stream into the disk's outer edge
+  const cxs = 26, cys = 58;
+  for (let k = 0; k < 40; k++) {
+    const u = (k / 40 + t * 0.25) % 1, bx = cxs + 8, by = cys + 6, ex = X0 - 66, ey = Y0 - 2, mx = 40, my = 110;
+    const px = (1 - u) ** 2 * bx + 2 * u * (1 - u) * mx + u * u * ex, py = (1 - u) ** 2 * by + 2 * u * (1 - u) * my + u * u * ey;
+    dot(px, py, u > 0.6 ? P.acid : P.cool, 0.8);
+  }
+  sun(cxs, cys, 9, SUN_B, t, 0.3);
+  bhole(X0, Y0, 12, t, { rIn: 18, rOut: 68, tilt: 0.24, glow: 0.4 * ae + 0.3 * acidOpen(s), spin: 1.4, ring: ke > 0.6 ? P.white : P.fg });
+  if (ae > 0.5) for (let k = 0; k < 6; k++) {   // x-ray flares on the acid accents
+    const a = hash(s * 6 + k) * 6.283, r = 18 + hash(s + k * 11) * 8;
+    cx.fillStyle = P.white; cx.fillRect(Math.round(X0 + Math.cos(a) * r), Math.round(Y0 + Math.sin(a) * r * 0.24), 2, 1);
+  }
+  line(X0 + 18, Y0 + 5, X0 + 30, Y0 + 40, P.dim);
+  text('INNER EDGE', X0 + 18, Y0 + 42, P.fg, 1, 'c');
+  text(`${fmtNum(3 * rsKm(BHM))} KM`, X0 + 18, Y0 + 49, P.acid, 1, 'c');
+  text('COMPANION STAR', 8, 72, P.cool);
+  banner('6. ACCRETION DISK', 'LAYER 6: ACID LINE', P.acid);
+  const f = fIsco(BHM);
+  fact(bar < 4 ? ['GAS FROM A NEIGHBOUR STAR', 'SPIRALS IN AND HEATS UP', { t: `${fmtBig(STAR.diskK)} K: X-RAYS`, c: P.acid }]
+               : [`INNER EDGE: 3 RS = ${fmtNum(3 * rsKm(BHM))} KM`, { t: `ORBITS ${Math.round(f)} TIMES A SECOND`, c: P.acid }, { t: `= ${Math.round(f)} HZ = NOTE ${noteName(f)}: OUR KEY`, c: P.dim }], P.acid);
+  timeline('DISK SPIN SLOWED FOR DISPLAY');
+}
+
+function sceneSpag(lt, t, sec) {
+  const build = 3.75 * BAR, p = Math.min(1, lt / build), Y0 = 168;
+  if (countdown(lt, sec, () => {
+    for (let k = 0; k < 40; k++) dot(X + Math.round(Math.sin(k) * 1), 60 + k * 2.5, P.lead, 0.8);
+    text('SPAGHETTIFIED', 90, 140, P.white, 2, 'c');
+  }, 140)) return;
+  stars(t);
+  const ke = pulse('kick', t, 9), Rs = rsKm(BHM);
+  const rkm = STAR.spagKm0 * Math.pow(Rs / STAR.spagKm0, p), g = tidalG(BHM, rkm);
+  bhole(X, Y0, 16, t, { rIn: 22, rOut: 70, tilt: 0.18, glow: ke * 0.5 });
+  // the astronaut: stretched along the fall, squeezed sideways, slowing + reddening as seen from outside
+  const yA = 46 + 90 * (1 - Math.pow(1 - p, 1.6)), hs = 1 + 5 * p * p, wsq = p > 0.6 ? 1 : 0;
+  const col = p < 0.35 ? P.white : p < 0.6 ? P.kick : p < 0.8 ? P.acid : P.lead;
+  ASTRO.forEach((row, r) => {
+    for (let c = wsq; c < 5 - wsq; c++) if (row[c] === '1') {
+      cx.fillStyle = col; cx.fillRect(X - 2 + c, Math.round(yA + r * hs), 1, Math.max(1, Math.round(hs)));
+    }
+  });
+  const top = Math.round(yA), bot = Math.round(yA + 9 * hs), al = 4 + p * 12;
+  arrow(X + 6, top + 2, X + 6, top + 2 - al, P.perc);
+  arrow(X + 6, bot - 2, X + 6, bot - 2 + al * 1.6, P.lead);
+  banner('7. SPAGHETTIFIED', 'BUILD: KICK ROLL + SNARE', P.lead);
+  fact(p < 0.8 ? [{ t: `STRETCH: ${fmtBig(g)} G`, c: col }, 'FEET PULLED HARDER THAN HEAD', { t: `${fmtBig(rkm)} KM FROM THE CENTRE`, c: P.dim }]
+               : [{ t: `STRETCH: ${fmtBig(g)} G`, c: col }, 'SEEN FROM OUTSIDE THEY SLOW,', { t: 'REDDEN AND FREEZE AT THE EDGE', c: P.dim }], P.lead);
+  timeline('FALL SLOWED, SIZES NOT TO SCALE');
+}
+
+// --- the drop: four 8-bar parts ---
+function kickShells(t, s, x0, y0, sy = 1) {
+  for (let k = 0; k < 40; k++) {
+    if (!hit('kick', s - k)) continue;
+    const dt = t - (s - k) * STEP, r = 10 + dt * 80;
+    if (r > 120) break;
+    ring(x0, y0, r, CYC[((s - k) >> 2) % CYC.length], 2, 0.7 * (1 - r / 120), sy);
+  }
+}
+
+function dropJets(plt, t, s, e8) {
+  const ke = pulse('kick', t, 8), ae = pulse('acid', t, 12);
+  kickShells(t, s, X, Y, 0.6);
+  for (const dir of [-1, 1]) {
+    const w = 1 + Math.round(ke * 2);
+    for (let d = 10; d < 110; d++) for (let x = -w; x <= w; x++) {
+      const py = Y + dir * d, px = X + x + Math.round(Math.sin(d * 0.25 - t * 14) * 0.7);
+      if (bay(px, py) < 16 * (1 - d / 120) * (0.5 + 0.5 * ke)) { cx.fillStyle = x === 0 ? P.white : P.perc; cx.fillRect(px, py, 1, 1); }
+    }
+    for (let k = 0; k < 16; k++) {   // a knot fired up each jet on every kick
+      if (!hit('kick', s - k)) continue;
+      const d = 12 + (t - (s - k) * STEP) * 150;
+      if (d < 110) fillCircle(X, Math.round(Y + dir * d), 1, k === 0 ? P.white : P.perc);
+    }
+  }
+  bhole(X, Y, 11, t, { rIn: 16, rOut: 64, tilt: 0.22, spin: 1.8, glow: 0.5 * ae + 0.4 * ke });
+  return { title: '8. FEEDING + JETS',
+    lines: e8 < 4 ? ['MAGNETIC FIELDS + SPIN FIRE', { t: 'JETS AT NEARLY LIGHT SPEED', c: P.perc }]
+                  : ['SAME MASS = SAME GRAVITY:', { t: 'FAR AWAY IT PULLS LIKE A STAR', c: P.dim }, { t: 'NOT A COSMIC VACUUM', c: P.acid }],
+    time: 'JETS: REALLY LIGHT-YEARS LONG' };
+}
+
+function dropMerger(plt, t, s, e8) {
+  const Tm = 8 * BAR, A0 = 46, W0 = 2 * Math.PI * 0.4, PHI0 = W0 * Tm * 8 / 5, TAU_MIN = Math.pow(14 / A0, 4);
+  // Newtonian inspiral: separation ~ tau^(1/4), phase = PHI0 (1 - tau^(5/8))
+  const tau = Math.max(TAU_MIN, 1 - plt / Tm), a = A0 * Math.pow(tau, 0.25), phi = PHI0 * (1 - Math.pow(tau, 5 / 8));
+  for (let k = 1; k * Math.PI < phi; k++) {   // one wave crest per half orbit
+    const te = Tm * (1 - Math.pow(1 - k * Math.PI / PHI0, 8 / 5)), rr = (plt - te) * 48 + a / 2;
+    if (rr < 130) ring(X, Y, rr, k % 2 ? P.bass : P.perc, 1, 0.8 * (1 - rr / 130), 0.6);
+  }
+  const holes = [0, Math.PI].map(o => [X + Math.cos(phi + o) * a / 2, Y + Math.sin(phi + o) * a / 2 * 0.6, Math.sin(phi + o)]);
+  holes.sort((p, q) => p[2] - q[2]).forEach(([x, y]) => bhole(Math.round(x), Math.round(y), 6, t, { disk: 0, ring: P.bass, glow: 0.4 }));
+  const chirping = e8 >= 6;
+  if (chirping) {
+    const x = (plt - 6 * BAR) / (2 * BAR), ta = chirpTau(F_START), tb = chirpTau(F_END), f = chirpF(ta - (ta - tb) * Math.min(1, x));
+    card([{ t: `${Math.round(f)} HZ`, s: 2, c: P.white }], 160);
+    cx.fillStyle = P.grid; cx.fillRect(40, 186, 100, 2);
+    cx.fillStyle = P.perc; cx.fillRect(40, 186, Math.round(100 * (f - F_START) / (F_END - F_START)), 2);
+  }
+  return { title: '9. MERGER', noShake: chirping,
+    lines: !chirping ? ['IF IT MEETS ANOTHER ONE', { t: 'THEY SPIRAL TOGETHER,', c: P.bass }, { t: 'RIPPLING SPACETIME ITSELF', c: P.perc }]
+                     : [{ t: 'LISTEN: THE CHIRP!', c: P.white }, { t: `${F_START} TO ${Math.round(F_END)} HZ: REAL PITCH`, c: P.perc }, { t: `SLOWED ${Math.round(CHIRP_SLOW)}X`, c: P.dim }],
+    time: 'ORBIT SLOWED FOR DISPLAY' };
+}
+
+function hawkingPairs(t, s, sh, x0, y0, back, col, far = 70) {
+  for (let k = 0; k < back; k++) {
+    const st = s - k;
+    if (!hit('hat', st) && !hit('ohat', st)) continue;
+    const dt = t - st * STEP, a = hash(st * 13) * 6.283, r0 = sh + 3;
+    const ro = r0 + dt * far, ri = r0 - dt * 25, c = Math.cos(a), sn = Math.sin(a);
+    if (dt < 0.08) line(x0 + c * ri, y0 + sn * ri, x0 + c * ro, y0 + sn * ro, P.white);
+    if (ri > sh) { cx.fillStyle = P.drone; cx.fillRect(Math.round(x0 + c * ri), Math.round(y0 + sn * ri), 1, 1); }
+    if (ro < 130) { cx.fillStyle = k === 0 ? P.white : col; cx.fillRect(Math.round(x0 + c * ro), Math.round(y0 + sn * ro), 2, 2); }
+  }
+}
+
+function dropHawking(plt, t, s, e8) {
+  const ke = pulse('kick', t, 8), sh = 16;
+  lensStars(t, X, Y, 30, sh);
+  kickShells(t, s, X, Y, 0.6);
+  bhole(X, Y, sh, t, { rIn: 22, rOut: 56, disk: 0.25, glow: 0.3 * ke, ring: P.perc });
+  hawkingPairs(t, s, sh, X, Y, 24, P.perc);
+  return { title: '10. HAWKING GLOW',
+    lines: e8 < 4 ? ['QUANTUM EFFECTS: IT GLOWS', { t: `TEMP: ${sci(hawkK(MF))} K`, c: P.perc }, { t: `COLDER THAN SPACE (${STAR.cmbK} K)`, c: P.dim }]
+                  : [{ t: `MERGED: ${fmtNum(MF)} SUNS`, c: P.bass }, 'IT EATS MORE THAN IT GLOWS', { t: 'UNTIL THE UNIVERSE COOLS', c: P.dim }],
+    time: 'PARTICLE PAIRS: SCHEMATIC' };
+}
+
+function dropEvap(plt, t, s, e8) {
+  const x = Math.min(1, plt / (8 * BAR)), ke = pulse('kick', t, 8);
+  const L0 = Math.log10(evapS(MF)), L = L0 * (1 - x);           // log10(seconds left): 10^78 s down to 1 s
+  const M = MF * Math.pow(10, (L - L0) / 3), T = hawkK(M), lt10 = Math.log10(T);
+  const col = lt10 < 3 ? P.lead : lt10 < 7 ? P.acid : lt10 < 11 ? P.kick : lt10 < 15 ? P.white : P.cool;
+  const sh = Math.max(1, Math.round(16 * (1 - x)));
+  kickShells(t, s, X, Y, 1);
+  ditherCircle(X, Y, sh, sh + 4 + Math.round(x * 14 + ke * 4), col, 0.3 + 0.5 * x);
+  bhole(X, Y, sh, t, { disk: 0, ring: col, glow: x });
+  hawkingPairs(t, s, sh, X, Y, 32, col, 70 + x * 120);
+  if (e8 === 7) ditherCircle(X, Y, 0, Math.round(4 + (plt / BAR - 7) * 40), P.white, 0.6);
+  const yrsLeft = Math.pow(10, L) / PHYS.yr, n = Math.floor(Math.log10(yrsLeft));
+  const left = n >= 1 ? `TIME LEFT: 10^${n} YRS` : `TIME LEFT: ${sci(Math.pow(10, L))} S`;
+  return { title: '11. EVAPORATION',
+    lines: e8 < 7 ? [{ t: left, c: P.fg }, { t: `TEMP: ${sci(T)} K`, c: col }, { t: 'SMALLER = HOTTER = FASTER', c: P.dim }]
+                  : ['THE LAST SECOND:', { t: `${fmtNum(M_LAST * PHYS.Msun / 1000)} TONNES LEFT`, c: P.kick }, { t: `${sci(hawkK(M_LAST))} K: GAMMA FLASH`, c: P.white }],
+    time: 'SCHEMATIC: LOG TIME' };
+}
+
+const DROP_PARTS = [dropJets, dropMerger, dropHawking, dropEvap];
+function sceneDrop(lt, t, sec) {
+  const bar = lb(lt), part = bar >> 3, e8 = bar % 8, s = Math.floor(t / STEP), beatN = Math.floor(t / BEAT);
+  const ke = pulse('kick', t, 8), ce = pulse('clap', t, 10), plt = lt - part * 8 * BAR;
+  warp(t, ke, X, Y);
+  const r = DROP_PARTS[part](plt, t, s, e8);
+  if (!CALM) ditherFill(CYC[beatN % CYC.length], 0.12 * ke);
+  const subCol = CYC[beatN % CYC.length];
+  banner(r.title, 'ALL LAYERS: THE DROP!', subCol, subCol);
+  fact(r.lines, subCol);
+  timeline(r.time);
+  if (!CALM && ce > 0.5) glitch(s, 3 + part);
+}
+
+function sceneOutro(lt, t, sec) {
+  stars(t);
+  const p = lt / secDur(sec), yrs = evapS(MF) / PHYS.yr;
+  ditherCircle(X, Y, 0, Math.round(30 + p * 60), P.drone, 0.3 * (1 - p));
+  banner('THE END', 'LAYER 1 AGAIN: DRONE', P.drone);
+  fact([{ t: `TOTAL LIFE: ~10^${Math.round(Math.log10(yrs))} YRS`, c: P.drone }, { t: `UNIVERSE SO FAR: ${sci(STAR.uniYrs)}`, c: P.dim }, 'NONE HAS EVAPORATED YET'], P.drone);
+  text('TIME HUGELY COMPRESSED', 90, 232, P.edge, 1, 'c');
+  text('SIZES NOT TO SCALE EXCEPT LIGHT PATHS', 90, 240, P.edge, 1, 'c');
+}
+
+const SCENES = { title: sceneTitle, star: sceneStar, core: sceneCore, collapse: sceneCollapse, nova: sceneNova, horizon: sceneHorizon,
+                 disk: sceneDisk, spag: sceneSpag, drop: sceneDrop, outro: sceneOutro };
+
+// ---------- main loop ----------
+function frame() {
+  const started = !!ac;
+  let tau = 0;
+  if (started) tau = Math.max(0, ac.currentTime - T0 - (ac.outputLatency || 0));
+  else if (DEBUG_T !== null) tau = DEBUG_T;
+  const t = tau % LOOP;
+  const bar = Math.floor(t / BAR), sec = SONG[BAR_SEC[bar]], lt = t - sec.start * BAR;
+  const showing = started || DEBUG_T !== null;
+
+  cx.setTransform(1, 0, 0, 1, 0, 0);
+  cx.fillStyle = P.bg; cx.fillRect(0, 0, W, H);
+  if (!showing) { sceneTitle(0, performance.now() / 1000, { started }); requestAnimationFrame(frame); return; }
+
+  const ke = pulse('kick', t, 12), D = sec.id === 'drop', e8 = lb(lt) % 8;
+  const shake = D && !(lb(lt) >> 3 === 1 && e8 >= 6) ? 6 : sec.id === 'nova' ? 3 : 0;
+  if (!CALM && shake && ke > 0.3) {
+    const s = Math.floor(t / STEP);
+    cx.setTransform(1, 0, 0, 1, Math.round((hash(s) - 0.5) * shake * ke), Math.round((hash(s + 99) - 0.5) * shake * ke));
+  }
+  if (sec.id === 'title') sceneTitle(lt, t, { started: true });
+  else SCENES[sec.id](lt, t, sec);
+  cx.setTransform(1, 0, 0, 1, 0, 0);
+  if (sec.id !== 'title') hud(t);
+
+  const flash = sec.id === 'nova' || sec.id === 'outro' || D;
+  if (lt < 0.3 && !flash && sec.k > 0) ditherFill(P.bg, 1 - lt / 0.3);
+  const pl = lt % (8 * BAR);
+  if (flash && !CALM && ((D && pl < 0.25) || (!D && lt < 0.5))) ditherFill(P.white, 0.8 * (1 - (D ? pl / 0.25 : lt / 0.5)));
+  if (!CALM && since('crash', t) < 0.05) { // one-frame negative on the crash
+    cx.globalCompositeOperation = 'difference'; cx.fillStyle = P.white; cx.fillRect(0, 0, W, H); cx.globalCompositeOperation = 'source-over';
+  }
+  if (started && ac.state === 'suspended') card([{ t: 'PAUSED', c: P.acid, s: 2 }], 150);
+  requestAnimationFrame(frame);
+}
+frame();
+})();
+</script>
+</body>
+</html>
