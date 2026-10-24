@@ -1,5 +1,6 @@
 ---
 name: scene-to-short
+disable-model-invocation: true
 description: Render one of this repo's pixel-art scenes (site/<scene>/index.html) to an upload-ready YouTube Short, a 1080x1920 H.264/AAC MP4 with the scene's synthesised audio in sync, a Shorts opening that hits from frame one, and a 1080x1920 thumbnail PNG. Use this whenever the user wants to turn a scene, explainer, animation or "the black hole one" into a video, MP4, Short, Reel or TikTok, export or record a scene, or get something they can upload to YouTube, even if they don't say "render" or name the file.
 ---
 
@@ -11,7 +12,7 @@ A Short also has a job the website version doesn't: it has to stop a thumb mid-s
 
 ## Workflow
 
-1. **Find the scene.** Scenes live in `site/<name>/index.html`. Match loose names ("the sun one" could be `sun-lifecycle` or `sun-lifecycle-2`; ask if it's really ambiguous).
+1. **Find the scene.** When called as `/scene-to-short <name>`, the argument is the scene (any extra words are options, like a thumbnail time or `bpm=`). With no argument, list the folders in `site/` and ask which one. Scenes live in `site/<name>/index.html`. Match loose names ("the sun one" could be `sun-lifecycle` or `sun-lifecycle-2`; ask if it's really ambiguous).
 2. **Check what's already there:** `grep -n "__capture\|SHORT" site/<name>/index.html`. Skip whatever exists.
 3. **Add the capture hook** (below).
 4. **Add the Shorts opening** (below). The audio hit always goes in. The title is the user's call: ask them before rendering.
