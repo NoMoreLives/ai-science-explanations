@@ -1,0 +1,1131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Fast Radio Burst: Goa Trance Mix</title>
+<style>
+  html,body{margin:0;height:100%;background:#020108;color:#6f6aa6;font:12px monospace}
+  body{display:flex;flex-direction:column;align-items:center;justify-content:center}
+  canvas{height:min(92vh,calc(100vw*16/9));aspect-ratio:9/16;image-rendering:pixelated;cursor:pointer;background:#04030c}
+  p{margin:6px 16px 0;text-align:center}
+</style>
+</head>
+<body>
+<canvas id="c" width="180" height="320"></canvas>
+<p>click / space: play-pause &middot; m: mute &middot; headphones + volume up &middot; ?bpm=140 &amp;ms=1 &amp;yrs=80 &amp;dm=500 (pc/cm&sup3;) &amp;gly=3 &amp;calm=1 (no shake/flash)</p>
+<script>
+(() => {
+'use strict';
+
+// ---------- config ----------
+const q = new URLSearchParams(location.search);
+const num = (k, d, lo, hi) => { const n = parseFloat(q.get(k)); return n >= lo && n <= hi ? n : d; };
+const BPM = num('bpm', 140, 130, 150);
+const CALM = q.get('calm') === '1';       // no screen shake or flashes
+const SHORT = q.get('short') === '1';     // YouTube Short: a hit on the first frame
+const DEBUG_T = q.has('t') ? parseFloat(q.get('t')) : null; // freeze visuals at t seconds (no audio)
+
+// A bright fast radio burst. Every number drawn on screen or heard comes from these.
+const FRB = {
+  ms: num('ms', 1, 0.1, 10),              // burst width
+  yrs: num('yrs', 80, 1, 1000),           // its energy = the Sun's total output over this many years
+  dm: num('dm', 500, 100, 600),           // dispersion measure, pc/cm^3: how many electrons it crossed
+  gly: num('gly', 3, 0.5, 8),             // distance, billion light years
+  fHi: 800, fLo: 400,                     // CHIME telescope band, MHz
+  perDay: 1000,                           // rough all-sky rate estimate
+  magKm: 20, bMagT: 1e10,                 // magnetar: diameter, magnetic field (tesla)
+};
+const L_SUN = 3.828e26, SEC_YR = 3.156e7, C_KMS = 299792, K_DM = 4.148808e-3, B_EARTH = 5e-5, BLINK_MS = 100;
+const E_J = L_SUN * FRB.yrs * SEC_YR;                  // joules
+const POWER_W = E_J / (FRB.ms / 1000);
+const SUNS = POWER_W / L_SUN;
+const SIZE_KM = C_KMS * FRB.ms / 1000;                 // light-travel limit on the source's size
+const B_RATIO = FRB.bMagT / B_EARTH;
+// dispersion: seconds a frequency (MHz) arrives behind the top of the band, and its inverse
+const delay = f => K_DM * FRB.dm * ((1000 / f) ** 2 - (1000 / FRB.fHi) ** 2);
+const fAt = s => 1000 / Math.sqrt(s / (K_DM * FRB.dm) + (1000 / FRB.fHi) ** 2);
+const SWEEP = delay(FRB.fLo);
+const SHIFT = 1e6;                                     // radio shifted down this much to be heard
+const heard = mhz => mhz * 1e6 / SHIFT;                // Hz
+
+const W = 180, H = 320, X = 90, Y = 112;
+const STEP = 60 / BPM / 4, BAR = STEP * 16, BEAT = STEP * 4;
+const SWEEP_LEN = Math.min(SWEEP, 7 * BAR - 0.2);      // must end inside the detector section
+
+// the track: one section per stage, each introducing one layer
+const SONG = [
+  { id: 'title', bars: 2 },
+  { id: 'pulse', bars: 8 },     // layer 1: 4/4 kick
+  { id: 'power', bars: 8 },     // layer 2: rolling goa bass
+  { id: 'journey', bars: 8 },   // layer 3: acid lead
+  { id: 'detector', bars: 8 },  // layer 4: hats + clap, and the real-speed dispersion sweep
+  { id: 'source', bars: 8 },    // layer 5: pulse arp
+  { id: 'ignite', bars: 4 },    // build: snare roll, riser, filter sweep
+  { id: 'drop', bars: 32 },     // everything: warp, host galaxy, whole sky, repeaters
+  { id: 'outro', bars: 4 },     // acid alone, filter closing
+];
+const BAR_SEC = [];
+{ let a = 0; SONG.forEach((s, k) => { s.start = a; s.k = k; a += s.bars; for (let b = 0; b < s.bars; b++) BAR_SEC.push(k); }); }
+const TOTAL_STEPS = BAR_SEC.length * 16;
+const LOOP = TOTAL_STEPS * STEP;
+
+// E phrygian: E E F G
+const ROOT = [40, 40, 41, 43];
+const riff = o => Array.from({ length: 16 }, (_, i) => o[i] || 0);
+const ACID = [[52, 0, 64, 52, 55, 52, 53, 0, 52, 64, 0, 59, 52, 55, 53, 64],
+              [52, 0, 64, 52, 55, 52, 53, 0, 52, 64, 0, 62, 60, 59, 55, 53],
+              [53, 0, 65, 53, 57, 53, 55, 0, 53, 65, 0, 60, 53, 57, 55, 65],
+              [55, 0, 67, 55, 59, 55, 57, 0, 55, 67, 0, 62, 64, 62, 59, 55]];
+const HI = [riff({ 0: 76, 3: 74, 6: 72, 8: 71, 10: 72, 12: 74, 14: 71 }), riff({ 0: 76, 3: 77, 6: 76, 8: 74, 10: 72, 12: 71, 14: 72 }),
+            riff({ 0: 77, 3: 76, 6: 72, 8: 69, 10: 72, 12: 77 }), riff({ 0: 79, 3: 77, 6: 74, 8: 71, 10: 74, 12: 79, 14: 83 })];
+const ARPC = [[64, 67, 71], [64, 67, 71], [65, 69, 72], [67, 71, 74]];
+const ARPI = [0, 1, 2, 3, 4, 3, 2, 1, 0, 2, 4, 5, 4, 2, 3, 1];   // index into chord tones over two octaves
+const BASSN = [-1, 0, 0, 0, -1, 0, 0, 0, -1, 0, 0, 0, -1, 0, 12, 0]; // goa roll: kick, bass, bass, bass
+const arpTone = (ch, k) => ARPC[ch][k % 3] + 12 * Math.floor(k / 3) + 12;
+
+function at(s) {
+  s = ((s % TOTAL_STEPS) + TOTAL_STEPS) % TOTAL_STEPS;
+  const bar = (s / 16) | 0, sec = SONG[BAR_SEC[bar]];
+  return { sec, id: sec.id, lb: bar - sec.start, i: s % 16 };
+}
+// the silent beat before the drop
+const hushAt = s => { const { id, lb, i } = at(s); return id === 'ignite' && lb === 3 && i >= 12; };
+
+// single source of truth for what plays on step s: audio, HUD and visuals all read this
+function hit(layer, s) {
+  const { id, lb, i } = at(s), ch = lb % 4, D = id === 'drop', e8 = lb % 8, part = lb >> 3;
+  const roll = D && e8 === 7 && i >= 12 && lb !== 31;  // snare roll into the next 8
+  const hush = hushAt(s);
+  const groove = id === 'journey' || id === 'detector' || id === 'source';
+  const sweeping = id === 'detector' && lb >= 1 && lb < 7;   // the lead keeps clear of the whistle
+  switch (layer) {
+    case 'kick':
+      if (id === 'pulse') return lb < 2 ? (i === 0 ? 1 : 0) : i % 4 === 0 ? 1 : 0;
+      if (id === 'power' || groove) return i % 4 === 0 ? 1 : 0;
+      if (id === 'ignite') return lb < 2 && i % 4 === 0 ? 1 : 0;
+      if (D) return !roll && i % 4 === 0 ? 1 : 0;
+      if (id === 'outro') return lb === 0 && i === 0 ? 1 : 0;
+      return 0;
+    case 'bass':
+      if (id === 'power' && lb < 2) return i % 4 === 2 ? ROOT[ch] : 0;
+      if (id === 'power' || groove || (id === 'ignite' && lb < 2) || (D && !roll)) return BASSN[i] >= 0 ? ROOT[ch] + BASSN[i] : 0;
+      return 0;
+    case 'acid':
+      if (id === 'journey') return lb < 2 && i % 4 ? 0 : ACID[ch][i];
+      if (id === 'detector') return sweeping ? 0 : ACID[ch][i];
+      if (id === 'source' || D || id === 'outro') return ACID[ch][i];
+      if (id === 'ignite') return hush ? 0 : ACID[ch][i];
+      return 0;
+    case 'hi': return D && (part === 1 || part === 3) ? HI[ch][i] : 0;
+    case 'hat':   // 1 = open off-beat, less = closed 16th
+      if (id === 'detector' && lb < 2) return i % 4 === 2 ? 1 : 0;
+      if (id === 'detector' || id === 'source' || (id === 'ignite' && lb < 2) || (D && !roll)) return i % 4 === 2 ? 1 : 0.45;
+      return 0;
+    case 'clap': return ((id === 'detector' && lb >= 4) || id === 'source' || (id === 'ignite' && lb < 2) || (D && !roll)) && (i === 4 || i === 12) ? 1 : 0;
+    case 'snare':
+      if (id === 'ignite' && lb >= 2) {
+        if (hush) return 0;
+        const v = 0.4 + 0.6 * ((lb - 2) * 16 + i) / 28;
+        return lb === 2 && i % 2 ? 0 : v;
+      }
+      return roll ? 0.6 + 0.13 * (i - 12) : 0;
+    case 'arp':
+      if (id === 'source') return lb < 4 && i % 2 ? 0 : arpTone(ch, ARPI[i]);
+      if (id === 'ignite') return hush ? 0 : arpTone(ch, ARPI[i]);
+      if (D) return arpTone(ch, ARPI[i]);
+      return 0;
+    case 'zap': return i === 14 && lb % 2 === 1 && !roll && (D || (id === 'source' && lb >= 4)) ? 1 : 0;
+    case 'sweep': return id === 'detector' && lb === 1 && i === 0 ? 1 : 0;
+    case 'crash': return i === 0 && ((D && e8 === 0) || (id === 'outro' && lb === 0)) ? 1 : 0;
+    case 'lead': return hit('acid', s) || hit('hi', s);
+    case 'perc': return hit('hat', s) || hit('clap', s) || hit('snare', s);
+    case 'fx': return hit('crash', s) || hit('zap', s) || hit('sweep', s);
+  }
+  return 0;
+}
+
+// how far the acid filter is open, 0..1: read by the audio and the meter.
+// Shut at the start, opening per section, swept wide in the build, twisted slowly up and down in each drop part.
+const OPEN = { title: [0.3, 0.3], pulse: [0.2, 0.2], power: [0.2, 0.2], journey: [0.05, 0.4], detector: [0.4, 0.5], source: [0.5, 0.65], outro: [0.9, 0.05] };
+function leadOpen(s) {
+  const { sec, id, lb, i } = at(s), x = (lb * 16 + i) / (sec.bars * 16);
+  if (id === 'ignite') return 0.65 + 0.35 * Math.min(1, (lb * 16 + i) / 60);
+  if (id === 'drop') {
+    const e8 = lb % 8;
+    if (e8 === 7 && lb !== 31) return 0.95 - 0.5 * i / 15;
+    return 0.5 + 0.45 * (0.5 - 0.5 * Math.cos(2 * Math.PI * (e8 * 16 + i) / 112));
+  }
+  const [a, b] = OPEN[id];
+  return a + (b - a) * x;
+}
+const cutoff = o => 150 * Math.pow(5000 / 150, o);   // Hz
+
+// each instrument wears one colour for the whole video
+const P = {
+  bg: '#04030c', grid: '#120f26', edge: '#2d2a55', dim: '#8a86c0', fg: '#f2eeff', shadow: '#000000', white: '#ffffff',
+  kick: '#ffe14a', kickD: '#5e4c10', kickL: '#fff4b0',    // the burst itself
+  bass: '#ff3ad0', bassD: '#4e0e40', bassL: '#ff9aea',    // energy
+  lead: '#7dff3a', leadD: '#1f4a10', leadL: '#d4ffb4',    // the radio wave
+  hat: '#3ae8ff', hatD: '#0c3c48', hatL: '#b0f6ff',       // the telescope
+  arp: '#a46aff', arpD: '#2e1a5e', arpL: '#dccaff',       // the magnetar
+  fx: '#ff8a2a', fxD: '#5e2c0c',
+  earth: '#3a8aff',
+};
+const SUNP = ['#ffd23f', '#c07010', '#ffc030', '#fff4b0'];
+const MAG = [P.arpL, '#6aa8ff', '#dbe9ff', P.white];
+const CYC = [P.kick, P.bass, P.lead, P.hat, P.arp, P.fx];
+const CYCD = [P.kickD, P.bassD, P.leadD, P.hatD, P.arpD, P.fxD];
+const cyc = n => CYC[((n % 6) + 6) % 6];
+
+// ---------- canvas + gfx helpers ----------
+const cv = document.getElementById('c');
+const cx = cv.getContext('2d');
+cx.imageSmoothingEnabled = false;
+
+// 3x5 pixel font, rows top to bottom
+const FONT = {
+  A:'010 101 111 101 101', B:'110 101 110 101 110', C:'011 100 100 100 011', D:'110 101 101 101 110',
+  E:'111 100 110 100 111', F:'111 100 110 100 100', G:'011 100 101 101 011', H:'101 101 111 101 101',
+  I:'111 010 010 010 111', J:'001 001 001 101 010', K:'101 101 110 101 101', L:'100 100 100 100 111',
+  M:'101 111 111 101 101', N:'110 101 101 101 101', O:'010 101 101 101 010', P:'110 101 110 100 100',
+  Q:'010 101 101 111 011', R:'110 101 110 101 101', S:'011 100 010 001 110', T:'111 010 010 010 010',
+  U:'101 101 101 101 111', V:'101 101 101 101 010', W:'101 101 111 111 101', X:'101 101 010 101 101',
+  Y:'101 101 010 010 010', Z:'111 001 010 100 111',
+  0:'111 101 101 101 111', 1:'010 110 010 010 111', 2:'110 001 010 100 111', 3:'110 001 010 001 110',
+  4:'101 101 111 001 001', 5:'111 100 110 001 110', 6:'011 100 111 101 111', 7:'111 001 010 010 010',
+  8:'111 101 111 101 111', 9:'111 101 111 001 110',
+  '-':'000 000 111 000 000', '.':'000 000 000 000 010', ':':'000 010 000 010 000',
+  '=':'000 111 000 111 000', '+':'000 010 111 010 000', '!':'010 010 010 000 010', '?':'110 001 010 000 010',
+  '>':'100 010 001 010 100', '<':'001 010 100 010 001', '/':'001 001 010 100 100', ',':'000 000 000 010 100',
+  '(':'010 100 100 100 010', ')':'010 001 001 001 010', "'":'010 010 000 000 000', '~':'000 011 110 000 000',
+  '^':'010 101 000 000 000', '#':'101 111 101 111 101', '%':'101 001 010 100 101',
+};
+const GL = {};
+for (const k in FONT) GL[k] = FONT[k].replace(/ /g, '');
+
+const textW = (s, sc) => s.length * 4 * sc - sc;
+function text(s, x, y, col, sc = 1, align = 'l') {
+  s = String(s).toUpperCase();
+  if (align === 'c') x = Math.round(x - textW(s, sc) / 2);
+  else if (align === 'r') x -= textW(s, sc);
+  cx.fillStyle = col;
+  for (let i = 0; i < s.length; i++) {
+    const g = GL[s[i]];
+    if (!g) continue;
+    for (let k = 0; k < 15; k++) {
+      if (g[k] === '1') cx.fillRect(x + i * 4 * sc + (k % 3) * sc, y + ((k / 3) | 0) * sc, sc, sc);
+    }
+  }
+}
+
+// bordered caption box; lines = [{t, c, s}]
+function card(lines, y, cxp = 90, border = P.fg) {
+  let w = 0, h = 4;
+  for (const l of lines) { const s = l.s || 1; w = Math.max(w, textW(String(l.t), s)); h += 5 * s + 3; }
+  w += 10;
+  if (w > W) console.warn('card too wide:', lines.map(l => l.t).join(' / '));
+  const x = Math.round(cxp - w / 2);
+  cx.fillStyle = P.shadow; cx.fillRect(x + 2, y + 2, w, h);
+  cx.fillStyle = P.bg;     cx.fillRect(x, y, w, h);
+  cx.fillStyle = border;
+  cx.fillRect(x, y, w, 1); cx.fillRect(x, y + h - 1, w, 1);
+  cx.fillRect(x, y, 1, h); cx.fillRect(x + w - 1, y, 1, h);
+  let ty = y + 4;
+  for (const l of lines) { const s = l.s || 1; text(l.t, cxp, ty, l.c || P.fg, s, 'c'); ty += 5 * s + 3; }
+  return h;
+}
+
+const BAYER = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
+const bay = (x, y) => BAYER[(y & 3) * 4 + (x & 3)];
+
+function fillCircle(x, y, r, col) {
+  if (r < 0) return;
+  cx.fillStyle = col;
+  for (let dy = -r; dy <= r; dy++) {
+    const dx = Math.floor(Math.sqrt((r + .5) * (r + .5) - dy * dy));
+    cx.fillRect(x - dx, y + dy, 2 * dx + 1, 1);
+  }
+}
+
+// ordered-dither ring/disc, d = 0..1 density
+function ditherCircle(x, y, r0, r1, col, d) {
+  if (d <= 0) return;
+  x = Math.round(x); y = Math.round(y); r1 = Math.round(r1);
+  cx.fillStyle = col;
+  const lvl = d * 16;
+  for (let py = Math.max(0, y - r1); py <= Math.min(H - 1, y + r1); py++) {
+    for (let px = Math.max(0, x - r1); px <= Math.min(W - 1, x + r1); px++) {
+      const dd = (px - x) ** 2 + (py - y) ** 2;
+      if (dd <= r1 * r1 && dd >= r0 * r0 && bay(px, py) < lvl) cx.fillRect(px, py, 1, 1);
+    }
+  }
+}
+
+// filled dithered ellipse, semi-axes a, b, rotated by rot; r0 = inner cut-out (0..1) for rims
+function dEllipse(x, y, a, b, rot, col, d, r0 = 0) {
+  if (d <= 0 || a < 1 || b < 0.5) return;
+  x = Math.round(x); y = Math.round(y);
+  const c = Math.cos(rot), s = Math.sin(rot), m = Math.ceil(Math.max(a, b)), lvl = d * 16, r2 = r0 * r0;
+  cx.fillStyle = col;
+  for (let py = Math.max(-m, -y); py <= Math.min(m, H - 1 - y); py++) {
+    for (let px = Math.max(-m, -x); px <= Math.min(m, W - 1 - x); px++) {
+      const u = (px * c + py * s) / a, v = (py * c - px * s) / b, qq = u * u + v * v;
+      if (qq <= 1 && qq >= r2 && bay(x + px, y + py) < lvl) cx.fillRect(x + px, y + py, 1, 1);
+    }
+  }
+}
+
+// thin dithered ring, sampled by angle; sy squashes it into an ellipse
+function ring(x, y, r, col, th, d, sy = 1) {
+  if (d <= 0 || r < 1) return;
+  cx.fillStyle = col;
+  const lvl = d * 16, n = Math.ceil(r * 7) + 8;
+  for (let k = 0; k < n; k++) {
+    const a = k / n * 2 * Math.PI, c = Math.cos(a), s = Math.sin(a);
+    for (let j = 0; j < th; j++) {
+      const px = Math.round(x + c * (r + j)), py = Math.round(y + s * (r + j) * sy);
+      if (px >= 0 && px < W && py >= 0 && py < H && bay(px, py) < lvl) cx.fillRect(px, py, 1, 1);
+    }
+  }
+}
+
+function line(x0, y0, x1, y1, col, d = 1) {
+  cx.fillStyle = col;
+  const n = Math.max(Math.abs(x1 - x0), Math.abs(y1 - y0), 1);
+  for (let k = 0; k <= n; k++) {
+    const px = Math.round(x0 + (x1 - x0) * k / n), py = Math.round(y0 + (y1 - y0) * k / n);
+    if (d >= 1 || bay(px, py) < d * 16) cx.fillRect(px, py, 1, 1);
+  }
+}
+
+function dot(px, py, col, d) {
+  px = Math.round(px); py = Math.round(py);
+  if (bay(px, py) < d * 16) { cx.fillStyle = col; cx.fillRect(px, py, 1, 1); }
+}
+
+// dithered pattern fills: d of a 4x4 tile in col (cached)
+const PAT = {};
+function ditherFill(col, d) {
+  const n = Math.max(0, Math.min(16, Math.round(d * 16)));
+  if (!n) return;
+  const key = col + n;
+  if (!PAT[key]) {
+    const t = document.createElement('canvas'); t.width = t.height = 4;
+    const c = t.getContext('2d'); c.fillStyle = col;
+    for (let i = 0; i < 16; i++) if (BAYER[i] < n) c.fillRect(i % 4, (i / 4) | 0, 1, 1);
+    PAT[key] = cx.createPattern(t, 'repeat');
+  }
+  cx.fillStyle = PAT[key]; cx.fillRect(0, 0, W, H);
+}
+
+function mulberry(a) { return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+const rng = mulberry(121102);
+const hash = n => { n = Math.imul(n ^ 0x5bd1e995, 0x27d4eb2d); n ^= n >>> 15; n = Math.imul(n, 0x85ebca6b); n ^= n >>> 13; return (n >>> 0) / 4294967296; };
+
+// a star: dithered corona, limb, body, hot spot and boiling granulation
+function sun(x, y, r, pal, t, glow = 0.35) {
+  r = Math.max(1, Math.round(r));
+  ditherCircle(x, y, r, Math.round(r * 1.3) + 4, pal[0], glow);
+  fillCircle(x, y, r, pal[1]);
+  if (r < 3) return;
+  fillCircle(x, y, r - 2, pal[2]);
+  fillCircle(x - Math.round(r * 0.22), y - Math.round(r * 0.22), Math.round(r * 0.5), pal[3]);
+  if (r < 6) return;
+  cx.fillStyle = pal[1];
+  const rr = (r - 2) * (r - 2), sc = 6 / r + 0.25;
+  for (let py = -r + 2; py <= r - 2; py++) {
+    for (let px = -r + 2; px <= r - 2; px++) {
+      if (px * px + py * py > rr) continue;
+      const v = Math.sin(px * sc * 1.7 + t * 1.9) * Math.sin(py * sc * 2.1 - t * 1.3) + Math.sin((px - py) * sc + t * 0.7) * 0.6;
+      if (v > 0.95 && bay(x + px, y + py) < 8) cx.fillRect(x + px, y + py, 1, 1);
+    }
+  }
+}
+
+const STARS = Array.from({ length: 140 }, () => ({ x: rng() * W | 0, y: rng() * H | 0, b: rng() }));
+const starCol = (k, t, s) => (k * 7 + Math.floor(t * 6)) % 11 === 0 ? P.fg : s.b > 0.6 ? P.dim : P.edge;
+function stars(t) {
+  STARS.forEach((s, k) => { cx.fillStyle = starCol(k, t, s); cx.fillRect(s.x, s.y, 1, 1); });
+}
+
+// ---------- the actors ----------
+// the burst: a yellow flash with diffraction spikes, e = 0..1
+function burstFlash(x, y, e) {
+  if (e < 0.02) return;
+  x = Math.round(x); y = Math.round(y);
+  ditherCircle(x, y, 0, 3 + e * 14, P.kick, 0.7 * e);
+  ditherCircle(x, y, 0, 2 + e * 5, P.kickL, e);
+  const L = Math.round(4 + 12 * e);
+  line(x - L, y, x + L, y, P.white, e); line(x, y - L, x, y + L, P.white, e);
+  cx.fillStyle = P.white; cx.fillRect(x, y, 1, 1);
+}
+
+// two-armed spiral galaxy seen at a tilt; returns the burst site on one arm
+function galaxy(x, y, r, rot, tilt = 0.5, d = 1, pal = [P.arpD, P.arp, P.bassL]) {
+  dEllipse(x, y, r * 1.05, r * 1.05 * tilt, 0, pal[0], 0.3 * d);
+  for (let arm = 0; arm < 2; arm++) {
+    for (let k = 0; k < 160; k++) {
+      const u = k / 160;
+      for (let j = 0; j < 3; j++) {
+        const h = hash(k * 7 + arm * 991 + j * 31) - 0.5, a = rot + arm * Math.PI + u * 4.2 + h * 0.35, rr = r * (0.12 + 0.88 * u) * (1 + h * 0.12);
+        dot(x + Math.cos(a) * rr, y + Math.sin(a) * rr * tilt, u < 0.3 ? pal[2] : pal[1], d * (1 - 0.5 * u));
+      }
+    }
+  }
+  dEllipse(x, y, r * 0.22, r * 0.22 * tilt + 1, 0, pal[2], 0.8 * d);
+  cx.fillStyle = P.white; cx.fillRect(Math.round(x), Math.round(y), 1, 1);
+  const sa = rot + 0.7 * 4.2, sr = r * (0.12 + 0.88 * 0.7);
+  return { x: Math.round(x + Math.cos(sa) * sr), y: Math.round(y + Math.sin(sa) * sr * tilt) };
+}
+
+const MAG_LS = [16, 28, 42, 58];
+// magnetar: a spinning neutron star in a dipole field (field lines r = L sin^2 th), sparks running along them
+function magnetar(x, y, t, s, o = {}) {
+  const spin = o.spin ?? t * 0.8, d = o.d ?? 1, Ls = o.Ls ?? MAG_LS;
+  const ax = -Math.PI / 2 + 0.5 * Math.sin(spin), sp = 0.35 + 0.65 * Math.abs(Math.cos(spin)), ca = Math.cos(ax), sa = Math.sin(ax);
+  const pt = (L, th, side) => { const r = L * Math.sin(th) ** 2, u = r * Math.cos(th), v = side * r * Math.sin(th) * sp; return [x + u * ca - v * sa, y + u * sa + v * ca]; };
+  Ls.forEach((L, li) => {
+    const n = Math.round(L * 3);
+    for (const side of [-1, 1]) for (let k = 1; k < n; k++) { const [px, py] = pt(L, k / n * Math.PI, side); dot(px, py, li % 2 ? P.arp : P.arpL, d * (li % 2 ? 0.9 : 0.6)); }
+  });
+  // one spark per arp note, sliding pole to pole
+  for (let k = 0; k < 8; k++) {
+    const st = s - k;
+    if (!hit('arp', st)) continue;
+    const u = (t - st * STEP) / (STEP * 6);
+    if (u > 1) continue;
+    const L = Ls[(hash(st * 5) * Ls.length) | 0], side = hash(st * 9) < 0.5 ? -1 : 1;
+    const [px, py] = pt(L, 0.2 + u * (Math.PI - 0.4), side);
+    cx.fillStyle = k === 0 ? P.white : P.arpL; cx.fillRect(Math.round(px), Math.round(py), 2, 2);
+  }
+  // beams out of the poles on every kick
+  const ke = pulse('kick', t, 10) * d;
+  if (ke > 0.05) for (const sg of [-1, 1]) line(x + ca * sg * 6, y + sa * sg * 6, x + ca * sg * (14 + 40 * ke), y + sa * sg * (14 + 40 * ke), P.kick, ke);
+  sun(x, y, 5, MAG, t, 0.6 * d);
+}
+
+// expanding radio shells, one per kick
+function kickShells(t, s, x0, y0, col) {
+  for (let k = 0; k < 40; k++) {
+    if (!hit('kick', s - k)) continue;
+    const r = 6 + (t - (s - k) * STEP) * 90;
+    if (r > 140) break;
+    ring(x0, y0, r, col || cyc((s - k) >> 2), 1, 0.6 * (1 - r / 140));
+  }
+}
+
+// psychedelic backdrop: slowly turning spiral spokes in the dark instrument colours
+function tunnel(t, d) {
+  for (let k = 0; k < 10; k++) {
+    const a0 = k / 10 * 6.283 + t * 0.35, col = CYCD[k % 6];
+    for (let r = 14; r < 150; r += 2) { const a = a0 + r * 0.025; dot(X + Math.cos(a) * r, Y + Math.sin(a) * r * 1.1, col, d); }
+  }
+}
+
+// flying through a starfield: z 1 = far, 0 = at the camera
+const WARP = Array.from({ length: 110 }, () => ({ a: rng() * 6.283, z: rng(), c: (rng() * 6) | 0 }));
+function warp(t, speed, len) {
+  for (const w of WARP) {
+    const z = ((w.z - t * speed) % 1 + 1) % 1, r0 = 4 / (z + 0.04), r1 = 4 / (z + 0.04 + len);
+    if (r1 > 200) continue;
+    const c = Math.cos(w.a), sn = Math.sin(w.a);
+    line(X + c * r1, Y + sn * r1, X + c * Math.min(r0, 200), Y + sn * Math.min(r0, 200), z < 0.3 ? CYC[w.c] : P.dim);
+  }
+}
+
+// ---------- text helpers ----------
+function fmtNum(v) { return v >= 10 ? String(Math.round(v)) : v >= 1 ? String(Math.round(v * 10) / 10) : String(parseFloat(v.toPrecision(2))); }
+function fmtBig(v) {
+  if (v >= 1e12) return fmtNum(v / 1e12) + ' TRILLION';
+  if (v >= 1e9) return fmtNum(v / 1e9) + ' BILLION';
+  if (v >= 1e6) return fmtNum(v / 1e6) + ' MILLION';
+  if (v >= 1e3) return Math.round(v).toLocaleString('en-US');
+  return fmtNum(v);
+}
+const rough = v => { const e = Math.pow(10, Math.floor(Math.log10(v)) - 1); return fmtBig(Math.round(v / e) * e); }; // 2 significant figures
+const sci = v => { const e = Math.floor(Math.log10(v)); return `${fmtNum(v / 10 ** e)}X10^${e}`; };
+const banner = (title, sub, col, subCol = P.fg) => card([{ t: title, s: 2, c: col }, { t: sub, c: subCol }], 4, 90, col);
+const fact = (lines, border) => card(lines.map(l => typeof l === 'string' ? { t: l } : l), 200, 90, border);
+const timeline = s => text(s, 90, 244, P.dim, 1, 'c');
+
+// ---------- audio (everything synthesised) ----------
+let ac = null, master, secGain, comp, duck, kickIn, bassIn, leadIn, hiIn, arpIn, percIn, fxSend;
+let sq125, sq25, sq50, noiseBuf, T0 = 0, muted = false, step = 0;
+
+const midi = m => 440 * Math.pow(2, (m - 69) / 12);
+// every node made while one step is being scheduled; all are disconnected once that step's last sound ends
+// (Chrome tidies finished notes up by itself, Safari keeps processing them and slows to a crawl)
+let bag = null;
+const track = n => { if (bag) bag.push(n); return n; };
+const G = v => { const g = track(ac.createGain()); g.gain.value = v; return g; };
+const F = (type, f, Q = 0.7) => { const b = track(ac.createBiquadFilter()); b.type = type; b.frequency.value = f; b.Q.value = Q; return b; };
+const chain = (...n) => { for (let i = 0; i < n.length - 1; i++) n[i].connect(n[i + 1]); return n[0]; };
+const pan = v => { const p = track(ac.createStereoPanner()); p.pan.value = v; return p; };
+
+function pulseWave(d) {
+  const N = 64, re = new Float32Array(N), im = new Float32Array(N);
+  for (let n = 1; n < N; n++) {
+    const a = 2 / (n * Math.PI);
+    re[n] = a * Math.sin(n * Math.PI * d) * Math.cos(n * Math.PI * d);
+    im[n] = a * Math.sin(n * Math.PI * d) ** 2;
+  }
+  return ac.createPeriodicWave(re, im);
+}
+
+// smooth tanh saturation (warm, not crushed)
+function warm(k) {
+  const n = 2048, c = new Float32Array(n);
+  for (let i = 0; i < n; i++) { const x = i / (n - 1) * 2 - 1; c[i] = Math.tanh(k * x) / Math.tanh(k); }
+  const s = ac.createWaveShaper(); s.curve = c; s.oversample = '2x';
+  return s;
+}
+
+function osc(wave, f, t) {
+  const o = track(ac.createOscillator());
+  if (typeof wave === 'string') o.type = wave; else o.setPeriodicWave(wave);
+  o.frequency.setValueAtTime(f, t);
+  return o;
+}
+function env(g, t, vol, atk, dur, hold) {
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.linearRampToValueAtTime(vol, t + atk);
+  if (hold) { g.gain.setValueAtTime(vol, t + dur * hold); }
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+}
+function play(o, t, dur) { o.start(t); o.stop(t + dur + 0.03); }
+
+function buildGraph() {
+  master = G(0.0001);
+  comp = ac.createDynamicsCompressor();
+  comp.threshold.value = -14; comp.knee.value = 6; comp.ratio.value = 5; comp.attack.value = 0.003; comp.release.value = 0.12;
+  secGain = G(0.78); // section level: the drop gets the headroom
+  chain(comp, secGain, master, ac.destination);
+  // sidechain bus: leads and arp pump against the kick
+  duck = G(1); duck.connect(comp);
+  // ping-pong echo, dotted eighth, each side darker than the last
+  const dl = ac.createDelay(1), dr = ac.createDelay(1);
+  dl.delayTime.value = dr.delayTime.value = STEP * 3;
+  const fbl = G(0.4), fbr = G(0.4), lpl = F('lowpass', 3200), lpr = F('lowpass', 2600);
+  fxSend = G(1);
+  const merge = ac.createChannelMerger(2);
+  chain(fxSend, dl, lpl, fbl, dr, lpr, fbr, dl);
+  lpl.connect(merge, 0, 0); lpr.connect(merge, 0, 1);
+  chain(merge, G(0.5), comp);
+  kickIn = G(1);
+  chain(kickIn, warm(2), F('lowpass', 9000), G(0.85), comp);
+  bassIn = G(1);
+  chain(bassIn, warm(1.6), F('lowpass', 1800), G(0.42), comp);
+  leadIn = G(1);
+  chain(leadIn, warm(2), G(0.38), duck);
+  leadIn.connect(G(0.22)).connect(fxSend);
+  hiIn = G(1);
+  chain(hiIn, G(0.36), duck);
+  hiIn.connect(G(0.45)).connect(fxSend);
+  arpIn = G(1);
+  chain(arpIn, G(0.34), duck);
+  arpIn.connect(G(0.35)).connect(fxSend);
+  percIn = G(0.8); percIn.connect(comp);
+  sq125 = pulseWave(0.125); sq25 = pulseWave(0.25); sq50 = pulseWave(0.5);
+  noiseBuf = ac.createBuffer(1, ac.sampleRate, ac.sampleRate);
+  const d = noiseBuf.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+}
+
+function noise(t, dur, vol, type, f, dest, Q = 0.8) {
+  const s = track(ac.createBufferSource()); s.buffer = noiseBuf;
+  const b = F(type, f, Q), g = G(1);
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  chain(s, b, g, dest);
+  s.start(t, Math.random() * 0.5); s.stop(t + dur + 0.03);
+}
+
+// THE TEACHING SIGNAL: one pure sine following the real dispersion curve, 800 -> 400 MHz heard as 800 -> 400 Hz,
+// at real speed, straight to the master (no compressor, no echo, no section gain)
+const SWEEP_VOL = 0.22;
+function sweep(t) {
+  const n = 512, c = new Float32Array(n);
+  for (let k = 0; k < n; k++) c[k] = heard(fAt(k / (n - 1) * SWEEP_LEN));
+  const o = track(ac.createOscillator()), g = G(1);
+  o.frequency.value = c[0];
+  o.frequency.setValueCurveAtTime(c, t, SWEEP_LEN);
+  g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(SWEEP_VOL, t + 0.01);
+  g.gain.setValueAtTime(SWEEP_VOL, t + SWEEP_LEN - 0.25); g.gain.linearRampToValueAtTime(0.0001, t + SWEEP_LEN);
+  chain(o, g, master); play(o, t, SWEEP_LEN);
+}
+
+// psy kick: a fast pitch dive onto E1, over before the bass's first sixteenth; ducks the melodic bus
+const KICK_NOTE = 28;
+function kick(t, vel) {
+  const o = osc('sine', 240, t);
+  o.frequency.exponentialRampToValueAtTime(midi(KICK_NOTE) * 1.8, t + 0.018);
+  o.frequency.exponentialRampToValueAtTime(midi(KICK_NOTE), t + 0.08);
+  const g = G(1); env(g, t, vel, 0.001, STEP * 0.95, 0.5);
+  chain(o, g, kickIn); play(o, t, STEP);
+  const c = osc(sq50, 2400, t), cg = G(1); env(cg, t, vel * 0.18, 0.0005, 0.008);
+  chain(c, cg, kickIn); play(c, t, 0.01);
+  duck.gain.setValueAtTime(0.45, t);
+  duck.gain.setTargetAtTime(1, t + 0.03, 0.05);
+}
+
+// sub boom on the big downbeats
+function impact(t) {
+  const o = osc('sine', 120, t), g = G(1);
+  o.frequency.exponentialRampToValueAtTime(30, t + 1.2);
+  env(g, t, 0.8, 0.003, 1.4, 0.15);
+  chain(o, g, kickIn); play(o, t, 1.4);
+}
+
+// rolling goa bass: a 25% pulse plucked through a closing lowpass, over a triangle body
+function rollBass(t, m, vel) {
+  const f = midi(m), dur = STEP * 0.85, lp = F('lowpass', 900, 3), g = G(1);
+  lp.frequency.setValueAtTime(1300, t); lp.frequency.exponentialRampToValueAtTime(260, t + dur);
+  env(g, t, vel, 0.002, dur, 0.25);
+  chain(lp, g, bassIn);
+  const a = osc(sq25, f, t); chain(a, G(0.55), lp); play(a, t, dur);
+  const b = osc('triangle', f, t); chain(b, G(0.9), g); play(b, t, dur);
+}
+
+// the acid line: two pulses through a screaming resonant lowpass, plucked open and settling on leadOpen's cutoff
+function acid(t, m, dur, o, acc) {
+  const fc = cutoff(o), lp = F('lowpass', fc, 10 + 6 * o), g = G(1);
+  lp.frequency.setValueAtTime(Math.min(fc * (acc ? 5 : 3), ac.sampleRate * 0.45), t);
+  lp.frequency.exponentialRampToValueAtTime(fc, t + Math.min(dur, 0.09));
+  env(g, t, acc ? 1 : 0.7, 0.002, dur, 0.6);
+  chain(lp, g, leadIn);
+  for (const [w, det] of [[sq50, -5], [sq25, 5]]) { const x = osc(w, midi(m), t); x.detune.value = det; chain(x, G(0.5), lp); play(x, t, dur); }
+}
+
+// the drop's soaring lead: a 25% pulse with a late vibrato, washed in echo
+function hiLead(t, m, dur) {
+  const f = midi(m), lp = F('lowpass', 4200, 1), g = G(1);
+  env(g, t, 0.9, 0.005, dur, 0.75);
+  chain(lp, g, hiIn);
+  const v = osc('sine', 5.5, t), vg = G(0);
+  vg.gain.setValueAtTime(0, t); vg.gain.linearRampToValueAtTime(14, t + Math.min(dur, 0.3));
+  for (const [w, det, a] of [[sq25, 0, 0.6], [sq50, 7, 0.4]]) {
+    const x = osc(w, f, t); x.detune.value = det; chain(v, vg, x.detune); chain(x, G(a), lp); play(x, t, dur);
+  }
+  play(v, t, dur);
+}
+
+// chip snare: a dropping triangle body and a burst of noise, for the build rolls
+function snare(t, vel) {
+  const o = osc('triangle', 340, t), g = G(1);
+  o.frequency.exponentialRampToValueAtTime(185, t + 0.05);
+  env(g, t, vel * 0.55, 0.001, 0.11);
+  chain(o, g, percIn); play(o, t, 0.11);
+  noise(t, 0.04 + 0.12 * vel, 0.55 * vel, 'highpass', 1800, percIn);
+}
+
+// clap: three quick noise slaps and a tail into the echo, kept above the whistle's band
+function clap(t, vel) {
+  for (const [d, v, l] of [[0, 0.5, 0.012], [0.011, 0.45, 0.012], [0.022, 0.6, 0.14]]) noise(t + d, l, v * vel, 'bandpass', 2200, percIn, 1.2);
+  noise(t, 0.2, 0.06 * vel, 'highpass', 2500, fxSend);
+}
+
+// 808-style metal: six detuned squares, bandpassed; hats and crash are made of this
+const METAL = [205.3, 304.4, 369.6, 522.7, 540, 800];
+function metal(t, dur, vol, hp, p = 0, dest = percIn) {
+  const bp = F('bandpass', 10000, 0.9), g = G(1);
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  chain(bp, F('highpass', hp), g, pan(p), dest);
+  for (const f of METAL) { const o = osc('square', f * 1.6, t); o.connect(bp); play(o, t, dur); }
+}
+const hatC = (t, p) => metal(t, 0.03, 0.12, 7500, p);
+const hatO = t => metal(t, 0.13, 0.17, 7000, 0.2);
+const crash = t => { metal(t, 1.6, 0.35, 4000, -0.3); metal(t + 0.002, 1.4, 0.25, 5000, 0.3, fxSend); noise(t, 1.2, 0.18, 'highpass', 6000, percIn); };
+
+// the arp: a thin 12.5% pulse pluck with a sine bell an octave up
+function arpNote(t, m, vol, p) {
+  const f = midi(m), lp = F('lowpass', 6000, 2), g = G(1), dur = STEP * 0.9;
+  lp.frequency.setValueAtTime(7000, t); lp.frequency.exponentialRampToValueAtTime(1800, t + dur);
+  env(g, t, vol, 0.002, dur, 0.1);
+  chain(lp, g, pan(p), arpIn);
+  const a = osc(sq125, f, t); chain(a, lp); play(a, t, dur);
+  const b = osc('sine', f * 2, t); chain(b, G(0.4), lp); play(b, t, dur);
+}
+
+// goa laser: a square diving five octaves, into the echo
+function zap(t) {
+  const o = osc(sq25, 3200, t), g = G(1);
+  o.frequency.exponentialRampToValueAtTime(110, t + 0.32);
+  env(g, t, 0.16, 0.002, 0.34);
+  chain(o, g, percIn); g.connect(fxSend); play(o, t, 0.34);
+}
+
+function riser(t, dur, vol) {
+  const s = track(ac.createBufferSource()); s.buffer = noiseBuf; s.loop = true;
+  const bp = F('bandpass', 400, 3), g = G(1);
+  bp.frequency.setValueAtTime(400, t); bp.frequency.exponentialRampToValueAtTime(11000, t + dur);
+  g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(vol, t + dur - 0.01); g.gain.linearRampToValueAtTime(0.0001, t + dur);
+  chain(s, bp, g, percIn); s.start(t); s.stop(t + dur + 0.02);
+}
+// scene change: two falling square blips
+function chime(t) {
+  for (const [f, d] of [[2093, 0], [1568, 0.07]]) {
+    const o = osc(sq25, f, t + d), g = G(1); env(g, t + d, 0.06, 0.002, 0.2);
+    chain(o, g, percIn); g.connect(fxSend); play(o, t + d, 0.2);
+  }
+}
+
+// a note rings until the next one on its layer (at most max steps), never into the silent beat
+function noteDur(layer, s, max) {
+  let n = 1;
+  while (n < max && !hit(layer, s + n) && !hushAt(s + n)) n++;
+  return n * STEP * 0.9;
+}
+
+function playStep(s, t) {
+  bag = [];
+  voices(s, t);
+  const nodes = bag, srcs = nodes.filter(n => typeof n.stop === 'function');
+  bag = null;
+  let left = srcs.length;
+  for (const n of srcs) n.onended = () => { if (--left === 0) for (const m of nodes) m.disconnect(); };
+}
+
+function voices(s, t) {
+  const { id, lb, i } = at(s), D = id === 'drop', e8 = lb % 8;
+  if (i === 0) secGain.gain.setValueAtTime(D ? 1 : 0.78, t);
+  if (i === 0 && lb === 0 && !D && id !== 'title' && id !== 'outro') chime(t);
+  if (id === 'title' && lb === 0 && i === 0) riser(t, BAR * 2, 0.5);
+  if (SHORT && s === 0) { impact(t); kick(t, 1); crash(t); zap(t); acid(t, 64, STEP * 2, 0.9, true); } // the Short can't open on a quiet riser
+  if (id === 'ignite' && lb === 0 && i === 0) riser(t, BAR * 3.75, 1.4);
+  if (D && e8 === 7 && i === 0 && lb !== 31) riser(t, BAR * 0.97, 0.6);
+  if (i === 0 && ((D && e8 === 0) || (id === 'outro' && lb === 0))) impact(t);
+  const k = hit('kick', s); if (k) kick(t, k);
+  const b = hit('bass', s); if (b) rollBass(t, b, i % 4 === 1 ? 0.7 : 0.9);
+  const an = hit('acid', s); if (an) acid(t, an, noteDur('acid', s, 2), leadOpen(s), i % 4 === 0 || an >= 64);
+  const hn = hit('hi', s); if (hn) hiLead(t, hn, noteDur('hi', s, 8));
+  const hv = hit('hat', s); if (hv) { if (hv === 1) hatO(t); else hatC(t, i % 2 ? 0.3 : -0.3); }
+  const cl = hit('clap', s); if (cl) clap(t, cl);
+  const sn = hit('snare', s); if (sn) snare(t, sn);
+  const a = hit('arp', s); if (a) arpNote(t, a, D ? 0.13 : 0.11, Math.sin(s * 0.7) * 0.4);
+  if (hit('zap', s)) zap(t);
+  if (hit('sweep', s)) sweep(t);
+  if (hit('crash', s)) crash(t);
+}
+
+function schedule() {
+  if (ac.state !== 'running') return;
+  const now = ac.currentTime;
+  while (T0 + step * STEP < now + 0.15) {
+    const t = T0 + step * STEP;
+    if (t > now - 0.02) playStep(step, t); // skip steps missed while the tab was throttled
+    step++;
+  }
+}
+
+function startAudio() {
+  ac = new (window.AudioContext || window.webkitAudioContext)();
+  buildGraph();
+  T0 = ac.currentTime + 0.2; step = 0;
+  setInterval(schedule, 25); schedule();
+  master.gain.setTargetAtTime(muted ? 0.0001 : 0.9, ac.currentTime, 0.2);
+  ac.resume();
+}
+
+// offline render for checking levels without ears: __render(fromBar, bars) -> per-bar peak/rms
+window.__render = async (bar0, bars, sr = 22050) => {
+  ac = new OfflineAudioContext(2, Math.ceil((bars * BAR + 1) * sr), sr);
+  buildGraph(); master.gain.value = 0.9;
+  for (let s = bar0 * 16; s < (bar0 + bars) * 16; s++) playStep(s, 0.05 + (s - bar0 * 16) * STEP);
+  const buf = await ac.startRendering();
+  ac = null;
+  const L = buf.getChannelData(0), out = [];
+  for (let b = 0; b < bars; b++) {
+    let pk = 0, sum = 0, n = 0;
+    for (let i = Math.floor((0.05 + b * BAR) * sr); i < Math.floor((0.05 + (b + 1) * BAR) * sr); i++) { const v = Math.abs(L[i]); pk = Math.max(pk, v); sum += v * v; n++; }
+    const s = SONG[BAR_SEC[bar0 + b]];
+    out.push({ bar: bar0 + b, sec: s.id, lb: bar0 + b - s.start, peak: +pk.toFixed(3), rms: +Math.sqrt(sum / n).toFixed(3) });
+  }
+  return out;
+};
+window.__song = () => SONG.map(s => ({ id: s.id, start: s.start * BAR, bars: s.bars }));
+window.__phys = () => ({ E_J, POWER_W, SUNS, SIZE_KM, B_RATIO, SWEEP, SWEEP_LEN, fStart: fAt(0), fEnd: fAt(SWEEP), heardStart: heard(fAt(0)), heardEnd: heard(fAt(SWEEP_LEN)),
+  roundTrip: [450, 600, 750].map(f => fAt(delay(f))), blinkX: BLINK_MS / FRB.ms,
+  open: SONG.map(s => [s.id, leadOpen(s.start * 16), leadOpen(s.start * 16 + s.bars * 16 - 1)]), cutoffMin: cutoff(0), cutoffMax: cutoff(1) });
+
+function toggle() {
+  if (!ac) { startAudio(); return; }
+  if (ac.state === 'running') ac.suspend(); else ac.resume();
+}
+function toggleMute() {
+  muted = !muted;
+  if (ac) master.gain.setTargetAtTime(muted ? 0.0001 : 0.9, ac.currentTime, 0.1);
+}
+cv.addEventListener('click', toggle);
+addEventListener('keydown', e => {
+  if (e.code === 'Space') { e.preventDefault(); toggle(); }
+  else if (e.key === 'm' || e.key === 'M') toggleMute();
+});
+
+// ---------- visual envelopes, read from the same hit() table ----------
+function since(layer, t, back = 64) {
+  const s = Math.floor(t / STEP);
+  for (let k = 0; k < back; k++) if (hit(layer, s - k)) return t - (s - k) * STEP;
+  return 99;
+}
+const pulse = (layer, t, rate = 10) => Math.exp(-since(layer, t) * rate);
+function last(layer, t, back = 8) {
+  const s = Math.floor(t / STEP);
+  for (let k = 0; k < back; k++) { const v = hit(layer, s - k); if (v) return [v, t - (s - k) * STEP]; }
+  return [0, 99];
+}
+const secDur = sec => sec.bars * BAR;
+const lb = lt => Math.floor(lt / BAR);
+
+// ---------- HUD: the live step sequencer + the acid filter meter ----------
+const ROWS = [['KIK', 'kick', P.kick, P.kickD], ['BAS', 'bass', P.bass, P.bassD], ['ACD', 'lead', P.lead, P.leadD],
+              ['HAT', 'perc', P.hat, P.hatD], ['ARP', 'arp', P.arp, P.arpD], ['FX', 'fx', P.fx, P.fxD]];
+function hud(t) {
+  const s = Math.floor(t / STEP), b0 = s - (s % 16), cur = s % 16, y0 = 257;
+  cx.fillStyle = P.shadow; cx.fillRect(6, y0 - 1, 172, 60);
+  cx.fillStyle = P.bg; cx.fillRect(4, y0 - 3, 172, 60);
+  cx.fillStyle = P.edge;
+  cx.fillRect(4, y0 - 3, 172, 1); cx.fillRect(4, y0 + 56, 172, 1); cx.fillRect(4, y0 - 3, 1, 60); cx.fillRect(175, y0 - 3, 1, 60);
+  ROWS.forEach(([lab, layer, col, dark], r) => {
+    const y = y0 + 1 + r * 9;
+    let active = false;
+    for (let i = 0; i < 16 && !active; i++) if (hit(layer, b0 + i)) active = true;
+    text(lab, 8, y, active ? (pulse(layer, t, 8) > 0.4 ? P.fg : col) : P.edge);
+    for (let i = 0; i < 16; i++) {
+      const on = hit(layer, b0 + i), x = 22 + i * 9;
+      cx.fillStyle = on ? (i === cur ? P.white : col) : active ? P.grid : '#0a0818';
+      cx.fillRect(x, y, 8, 5);
+    }
+  });
+  cx.fillStyle = P.fg; cx.fillRect(22 + cur * 9, y0 + 55, 8, 1); // playhead
+}
+
+function meter(t) {
+  const o = leadOpen(Math.floor(t / STEP)), n = Math.round(o * 20), y = 234;
+  text('ACID', 4, y, P.lead);
+  for (let k = 0; k < 20; k++) { cx.fillStyle = k < n ? (k === n - 1 ? P.leadL : P.lead) : P.grid; cx.fillRect(30 + k * 5, y, 4, 5); }
+  text(`${Math.round(cutoff(o))} HZ`, 176, y, P.leadL, 1, 'r');
+}
+
+// big countdown over the last bar of a build; true on the silent beat
+function countdown(lt, sec, ifSilent, x = 90, y = 90) {
+  const bar = lb(lt), beat = Math.floor((lt % BAR) / BEAT);
+  if (bar !== sec.bars - 1) return false;
+  if (beat === 3) { ifSilent(); return true; }
+  const n = String(3 - beat);
+  text(n, x + 2, y + 2, P.shadow, 6, 'c'); text(n, x, y, P.white, 6, 'c');
+  return false;
+}
+
+// ---------- scenes ----------
+function sceneTitle(lt, t, ctl) {
+  stars(t);
+  const g = galaxy(X, 156, 38, t * 0.25, 0.45);
+  burstFlash(g.x, g.y, Math.exp(-(t % 1.2) * 5));   // song time when playing; the not-started card is passed wall-clock seconds
+  card([{ t: 'FAST RADIO', s: 3, c: P.kick }, { t: 'BURST', s: 3, c: P.hat }, { t: `CHIP GOA TRANCE - ${BPM} BPM`, c: P.dim }], 30);
+  text(`${fmtNum(FRB.ms)} MS. ${FRB.yrs} YEARS OF SUNSHINE.`, 90, 214, P.dim, 1, 'c');
+  const on = ((t * 2) | 0) % 2 === 0;
+  if (!ctl.started) {
+    if (on) card([{ t: 'TAP TO START', c: P.kick, s: 2 }], 250);
+    text('HEADPHONES + VOLUME UP', 90, 290, P.edge, 1, 'c');
+  } else if (on) card([{ t: 'A FLASH FROM ANOTHER GALAXY', c: P.kick }], 250);
+}
+
+function scenePulse(lt, t, sec) {
+  stars(t);
+  const bar = lb(lt), s = Math.floor(t / STEP), ke = pulse('kick', t, 14);
+  kickShells(t, s, X, 96, P.kick);
+  burstFlash(X, 96, ke);
+  cx.fillStyle = P.white; cx.fillRect(X, 96, 1, 1);
+  // to scale: 1 px = 1 ms
+  const y1 = 156, y2 = 168, bx = 62;
+  text(`BURST ${fmtNum(FRB.ms)} MS`, 58, y1, P.kick, 1, 'r');
+  cx.fillStyle = ke > 0.3 ? P.white : P.kick; cx.fillRect(bx, y1, Math.max(1, Math.round(FRB.ms)), 5);
+  text(`BLINK ${BLINK_MS} MS`, 58, y2, P.dim, 1, 'r');
+  cx.fillStyle = P.edge; cx.fillRect(bx, y2, BLINK_MS, 5);
+  text('TO SCALE: 1 PIXEL = 1 MS', 176, 180, P.edge, 1, 'r');
+  banner('1. THE PULSE', 'LAYER 1: 4/4 KICK = THE BURST', P.kick);
+  fact(bar < 4 ? ['A FLASH OF RADIO WAVES', { t: `LASTING ABOUT ${fmtNum(FRB.ms)} MS`, c: P.kick }, { t: `A BLINK IS ${fmtBig(BLINK_MS / FRB.ms)}X LONGER`, c: P.dim }]
+               : ['SO SHORT, THE SOURCE IS SMALL:', { t: `UNDER ~${fmtBig(SIZE_KM)} KM ACROSS`, c: P.kick }, { t: `LIGHT ONLY GOES THAT FAR IN ${fmtNum(FRB.ms)} MS`, c: P.dim }], P.kick);
+  timeline('SCHEMATIC: 1 KICK = 1 BURST. SLOWED');
+}
+
+function scenePower(lt, t, sec) {
+  stars(t);
+  const s = Math.floor(t / STEP), bar = lb(lt), ke = pulse('kick', t, 10), be = pulse('bass', t, 12);
+  const p = Math.min(1, lt / (secDur(sec) - BAR));   // the Sun's column is full for the last bar
+  const sx = 46, fx = 134, top = 84, bot = 168, cw = 24, inner = bot - top - 2;
+  sun(sx, 58, 12 + Math.round(be), SUNP, t, 0.3 + 0.3 * be);
+  burstFlash(fx, 58, Math.max(0.15, ke));
+  for (const [x, f, col, colL] of [[sx, p, P.bass, P.bassL], [fx, 1, P.kick, P.kickL]]) {
+    const x0 = x - cw / 2;
+    cx.fillStyle = P.edge;
+    cx.fillRect(x0, top, cw, 1); cx.fillRect(x0, bot, cw, 1); cx.fillRect(x0, top, 1, bot - top); cx.fillRect(x0 + cw - 1, top, 1, bot - top + 1);
+    const h = Math.round(inner * f);
+    cx.fillStyle = col; cx.fillRect(x0 + 1, bot - h, cw - 2, h);
+    cx.fillStyle = colL; cx.fillRect(x0 + 1, bot - h, cw - 2, 1);
+  }
+  if (ke > 0.3) { cx.fillStyle = P.white; cx.fillRect(fx - cw / 2 + 1, top + 1, cw - 2, Math.round(inner * ke)); }
+  // sunlight packets: each bass note drops one into the Sun's column
+  for (let k = 0; k < 6; k++) {
+    const st = s - k;
+    if (!hit('bass', st)) continue;
+    const u = (t - st * STEP) / (STEP * 4), y = 74 + u * (bot - inner * p - 74);
+    if (u <= 1) { cx.fillStyle = P.bassL; cx.fillRect(sx - 1 + ((st * 5) % 3 - 1) * 5, Math.round(y), 2, 2); }
+  }
+  text(p < 1 ? '<' : '=', X, (top + bot) / 2 - 5, P.fg, 2, 'c');
+  text('SUN', sx, bot + 4, SUNP[0], 1, 'c'); text(`YEAR ${Math.floor(p * FRB.yrs)}`, sx, bot + 11, P.bass, 1, 'c');
+  text('FRB', fx, bot + 4, P.kick, 1, 'c'); text(`${fmtNum(FRB.ms)} MS`, fx, bot + 11, P.kick, 1, 'c');
+  banner('2. THE POWER', 'LAYER 2: ROLLING BASS = SUNLIGHT', P.bass);
+  fact(bar < 4 ? [`OUR SUN, SHINING FOR ${FRB.yrs} YRS:`, { t: `~${sci(E_J)} JOULES`, c: P.bass }, { t: `ONE FRB: THE SAME IN ${fmtNum(FRB.ms)} MS`, c: P.dim }]
+               : ['FOR THAT INSTANT, ITS POWER IS', { t: `~${rough(SUNS)} SUNS`, c: P.bass }, { t: 'ALL SHINING AT ONCE', c: P.dim }], P.bass);
+  timeline(`SCHEMATIC: ${FRB.yrs} YEARS IN ${Math.round(secDur(sec) - BAR)} SECONDS`);
+}
+
+const ELEC = Array.from({ length: 90 }, () => ({ x: rng() * W, y: 50 + rng() * 108, v: 2 + rng() * 4 }));
+const NB = 12;
+function sceneJourney(lt, t, sec) {
+  stars(t);
+  const bar = lb(lt);
+  for (const e of ELEC) dot((e.x + t * e.v) % W, e.y + Math.sin(t + e.x) * 2, P.edge, 1);   // free electrons
+  galaxy(12, 102, 9, t * 0.3, 0.6, 0.8);
+  fillCircle(172, 102, 3, P.earth); text('EARTH', 176, 110, P.earth, 1, 'r');
+  // one burst every two bars, a dash per frequency band; low bands fall behind as it crosses the gas
+  const per = 2 * BAR, tau = (lt % per) / per, head = 20 + tau * 140, [ln, ldt] = last('acid', t, 3);
+  const lit = ln ? Math.round((67 - ln) / 15 * (NB - 1)) : -1;   // the lead's pitch lights its band
+  for (let b = 0; b < NB; b++) {
+    const f = FRB.fHi - b / (NB - 1) * (FRB.fHi - FRB.fLo), y = 58 + b * 8;
+    const x = Math.round(head - delay(f) / SWEEP * tau * 70);
+    line(x - 12, y, x - 4, y, P.leadD, 0.7);
+    cx.fillStyle = b === lit && ldt < STEP * 1.5 ? P.white : b < NB / 3 ? P.leadL : P.lead;
+    cx.fillRect(x - 3, y, 4, 2);
+  }
+  text(`${FRB.fHi} MHZ`, 4, 50, P.leadL); text(`${FRB.fLo} MHZ`, 4, 152, P.lead);
+  banner('3. THE JOURNEY', 'LAYER 3: ACID LEAD = RADIO WAVE', P.lead);
+  fact(bar < 4 ? ['SPACE IS NOT QUITE EMPTY', { t: 'THIN GAS: FREE ELECTRONS', c: P.lead }, { t: 'THEY SLOW RADIO WAVES DOWN', c: P.dim }]
+               : ['LOW FREQUENCIES LAG MORE', { t: 'DELAY ~ 1 / FREQUENCY^2', c: P.lead }, { t: 'MORE LAG = MORE GAS CROSSED', c: P.dim }], P.lead);
+  timeline('SCHEMATIC: HIGH NOTE = HIGH FREQ');
+}
+
+function sceneDetector(lt, t, sec) {
+  const s = Math.floor(t / STEP), bar = lb(lt), pe = pulse('perc', t, 12);
+  const x0 = 26, x1 = 170, y0 = 40, y1 = 164, tMax = 7 * BAR, ts = lt - BAR;   // the sweep starts one bar in
+  const thr = 0.035 + 0.05 * pe;
+  cx.fillStyle = P.hatD;   // radio static, fizzing on the hats
+  for (let py = y0; py <= y1; py++) for (let px = x0; px <= x1; px++) if (hash(px * 131 + py * 7919 + s * 104729) < thr) cx.fillRect(px, py, 1, 1);
+  cx.fillStyle = P.edge;
+  cx.fillRect(x0 - 1, y0 - 1, x1 - x0 + 3, 1); cx.fillRect(x0 - 1, y1 + 1, x1 - x0 + 3, 1);
+  cx.fillRect(x0 - 1, y0 - 1, 1, y1 - y0 + 3); cx.fillRect(x1 + 1, y0 - 1, 1, y1 - y0 + 3);
+  // the arrival curve, drawn as it arrives: the same delay() the audio sweep is built from
+  const tx = d => x0 + d / tMax * (x1 - x0);
+  let px0 = null;
+  for (let py = y0; py <= y1; py++) {
+    const f = FRB.fHi - (py - y0) / (y1 - y0) * (FRB.fHi - FRB.fLo), d = delay(f), x = Math.round(tx(d));
+    if (ts < 0 || d > Math.min(ts, SWEEP_LEN)) break;
+    const col = ts - d < 0.3 ? P.white : P.hat;
+    line(px0 ?? x, py, x, py, col); cx.fillRect(x + 1, py, 1, 1);
+    px0 = x;
+  }
+  text(String(FRB.fHi), x0 - 3, y0, P.dim, 1, 'r'); text(String(FRB.fLo), x0 - 3, y1 - 4, P.dim, 1, 'r');
+  text('MHZ', x0 - 3, (y0 + y1) / 2 - 2, P.edge, 1, 'r');
+  for (let k = 0; k <= tMax; k += 4) text(`${k}S`, tx(k), y1 + 4, P.edge, 1, 'c');
+  let read;
+  if (ts < 0) read = 'LISTENING...';
+  else if (ts <= SWEEP_LEN) {
+    const fNow = fAt(ts), y = Math.round(y0 + (FRB.fHi - fNow) / (FRB.fHi - FRB.fLo) * (y1 - y0));
+    cx.fillStyle = P.white; cx.fillRect(x0 - 3, y, 2, 1);
+    read = `HEARING ${Math.round(fNow)} MHZ AS ${Math.round(heard(fNow))} HZ`;
+  } else read = `${fmtNum(SWEEP)} S FROM ${FRB.fHi} TO ${FRB.fLo} MHZ`;
+  text(read, 90, 182, P.hat, 1, 'c');
+  banner('4. THE WHISTLE', 'LAYER 4: HATS + CLAP = STATIC', P.hat);
+  fact(bar < 4 ? ['A RADIO TELESCOPE CATCHES IT', { t: `${FRB.fHi} DOWN TO ${FRB.fLo} MHZ`, c: P.hat }, { t: `SPREAD OVER ${fmtNum(SWEEP)} S (DM ${FRB.dm})`, c: P.dim }]
+               : ['THIS IS THE REAL SWEEP SHAPE', { t: `RADIO SHIFTED DOWN ${fmtBig(SHIFT)} X`, c: P.hat }, { t: 'SO MHZ BECOME HZ YOU CAN HEAR', c: P.dim }], P.hat);
+  timeline('REAL SPEED: LISTEN FOR THE WHISTLE');
+}
+
+function sceneSource(lt, t, sec) {
+  stars(t);
+  const bar = lb(lt), s = Math.floor(t / STEP);
+  magnetar(X, 104, t, s);
+  burstFlash(X, 104, pulse('zap', t, 6));
+  text('MAGNETAR', X, 156, P.arpL, 1, 'c'); text(`~${FRB.magKm} KM ACROSS`, X, 163, P.arp, 1, 'c');
+  banner('5. THE SOURCE', 'LAYER 5: PULSE ARP = FIELD SPARKS', P.arp);
+  fact(bar < 4 ? ['PRIME SUSPECT: A MAGNETAR', { t: 'A DEAD STAR, CITY-SIZED', c: P.arp }, { t: `MAGNETIC FIELD ~${sci(B_RATIO)} X EARTH'S`, c: P.dim }]
+               : ['APRIL 2020: SGR 1935+2154', { t: 'A MAGNETAR IN OUR GALAXY', c: P.arp }, { t: 'FIRED A BURST LIKE THIS', c: P.dim }], P.arp);
+  timeline('SCHEMATIC. SPIN SLOWED');
+}
+
+function sceneIgnite(lt, t, sec) {
+  const s = Math.floor(t / STEP), build = 3.75 * BAR, p = Math.min(1, lt / build);
+  stars(t);
+  magnetar(X, Y, t, s, { spin: t * 0.8 + 6 * p * p, Ls: MAG_LS.map(L => L * (1 - 0.4 * p)) });
+  ring(X, Y, 90 * (1 - p) + 8, P.kick, 1, 0.5 + 0.5 * p);
+  banner('6. CHARGE UP', 'BUILD: SNARE ROLL + FILTER SWEEP', P.kick);
+  fact(['THE FIELD TWISTS AND STRAINS', { t: 'ENERGY PILES UP...', c: P.kick }, { t: `...AND GOES IN ${fmtNum(FRB.ms)} MS`, c: P.dim }], P.kick);
+  timeline('SCHEMATIC. TIME COMPRESSED');
+  countdown(lt, sec, () => {   // drawn last so the digits sit on top; the silent beat wipes the scene
+    cx.fillStyle = P.bg; cx.fillRect(0, 0, W, H);
+    stars(t);
+    burstFlash(X, Y, 1);
+    text('BURST!', 90, 176, P.white, 3, 'c');
+  }, 90, 40);
+}
+
+// --- the drop: four 8-bar space scenes ---
+function dropWarp(plt, t, s, e8, col) {
+  const ke = pulse('kick', t, 8), z = Math.min(1, plt / (8 * BAR));
+  tunnel(t, 0.35);
+  warp(t, 0.35 + 0.25 * ke, 0.03 + 0.08 * ke);
+  kickShells(t, s, X, Y);
+  const g = galaxy(X, Y, 4 + 40 * z * z, t * 0.3, 0.5, 0.4 + 0.6 * z);
+  burstFlash(g.x, g.y, pulse('zap', t, 6));
+  return { title: '7. WARP DRIVE',
+    lines: e8 < 4 ? ['RIDE IT BACK TO ITS GALAXY', { t: `~${fmtNum(FRB.gly)} BILLION LIGHT YEARS`, c: col }, { t: `IT LEFT ${fmtNum(FRB.gly)} BILLION YEARS AGO`, c: P.dim }]
+                  : ['ON THE WAY IT CROSSED THE GAS', { t: 'BETWEEN THE GALAXIES', c: col }, { t: 'FRBS FOUND THE MISSING MATTER', c: P.dim }],
+    time: 'SCHEMATIC FLIGHT. NOT TO SCALE' };
+}
+
+function dropGalaxy(plt, t, s, e8, col) {
+  stars(t);
+  const ke = pulse('kick', t, 8);
+  const g = galaxy(X, 104, 66, t * 0.18, 0.55);
+  kickShells(t, s, g.x, g.y, P.kick);
+  burstFlash(g.x, g.y, Math.max(0.6 * ke, pulse('zap', t, 5)));
+  text('BURST', g.x + 8, g.y - 10, P.kick);
+  return { title: '8. HOST GALAXY',
+    lines: e8 < 4 ? ['A GALAXY MUCH LIKE OURS', { t: 'ONE STAR IN IT FIRES', c: col }, { t: `${rough(SUNS)} SUNS FOR ${fmtNum(FRB.ms)} MS`, c: P.dim }]
+                  : ['FOR THAT INSTANT IT OUTSHINES', { t: 'ITS WHOLE GALAXY IN RADIO', c: col }, { t: 'BILLIONS OF STARS, BEATEN', c: P.dim }],
+    time: 'SCHEMATIC. BURST SIZE EXAGGERATED' };
+}
+
+function dropSky(plt, t, s, e8, col) {
+  stars(t);
+  const a = 84, b = 42, y = 108;
+  dEllipse(X, y, a, b, 0, P.grid, 1);
+  for (let px = -a; px <= a; px++) {   // the Milky Way across the map
+    const py = 10 * Math.sin(px / 30 + 0.5);
+    for (let j = -4; j <= 4; j++) if ((px / a) ** 2 + ((py + j) / b) ** 2 < 1) dot(X + px, y + py + j, P.arpD, 0.7 * (1 - Math.abs(j) / 5));
+  }
+  ring(X, y, a, P.edge, 1, 1, b / a);
+  // a new burst somewhere on the sky on every kick
+  for (let k = 0; k < 160; k++) {
+    const st = s - k;
+    if (!hit('kick', st)) continue;
+    const r = Math.sqrt(hash(st * 3 + 1)) * 0.95, th = hash(st * 7 + 2) * 6.283;
+    const bx = X + Math.cos(th) * r * a, by = y + Math.sin(th) * r * b, age = t - st * STEP;
+    if (k < 4) { burstFlash(bx, by, Math.exp(-age * 6)); ring(bx, by, 2 + age * 30, cyc(st >> 2), 1, Math.max(0, 0.7 - age)); }
+    dot(bx, by, cyc(st >> 2), 1 - k / 160); dot(bx + 1, by, cyc(st >> 2), 0.6 * (1 - k / 160));
+  }
+  text('ALL-SKY MAP', X, y + b + 6, P.edge, 1, 'c');
+  return { title: '9. THE WHOLE SKY',
+    lines: e8 < 4 ? ['ALL OVER THE SKY, EVERY DAY', { t: `~${fmtBig(FRB.perDay)} BURSTS A DAY (EST.)`, c: col }, { t: 'WE CATCH ONLY A FEW', c: P.dim }]
+                  : ['FROM EVERY DIRECTION:', { t: 'FAR GALAXIES, NOT OURS', c: col }, { t: 'TELESCOPES FIND A FEW A DAY', c: P.dim }],
+    time: 'SCHEMATIC: 1 KICK = 1 BURST' };
+}
+
+const rep = st => hit('arp', st) && hash(st * 3 + 1) > 0.62;   // the repeater fires on some arp notes, irregularly
+function dropRepeat(plt, t, s, e8, col) {
+  tunnel(t, 0.25);
+  stars(t);
+  let re = 0;
+  for (let k = 0; k < 16; k++) if (rep(s - k)) { re = Math.exp(-(t - (s - k) * STEP) * 8); break; }
+  const g = galaxy(X, 100, 24, t * 0.4, 0.8, 0.8, [P.bassD, P.bass, P.kickL]);
+  burstFlash(g.x, g.y, re);
+  kickShells(t, s, g.x, g.y);
+  // burst log: one tick per flash, newest on the right
+  const ly = 182;
+  line(4, ly, 176, ly, P.edge);
+  for (let k = 0; k < 64; k++) {
+    const st = s - k;
+    if (!rep(st)) continue;
+    const h = 3 + ((hash(st * 11) * 10) | 0);
+    cx.fillStyle = k === 0 ? P.white : P.arp; cx.fillRect(170 - Math.round(k * 2.6), ly - h, 1, h);
+  }
+  text('BURST LOG', 4, ly + 3, P.arp);
+  return { title: '10. REPEATERS',
+    lines: e8 < 4 ? ['SOME BURSTS REPEAT', { t: 'FRB 121102: THOUSANDS SEEN', c: col }, { t: 'MOST HAVE FIRED ONLY ONCE', c: P.dim }]
+                  : ['WHAT MAKES THEM ALL?', { t: 'MAGNETARS? SOMETHING ELSE?', c: col }, { t: 'STILL A COSMIC MYSTERY', c: P.dim }],
+    time: 'SCHEMATIC. FLASHES SPED UP' };
+}
+
+const DROP_PARTS = [dropWarp, dropGalaxy, dropSky, dropRepeat];
+function sceneDrop(lt, t, sec) {
+  const bar = lb(lt), part = bar >> 3, e8 = bar % 8, s = Math.floor(t / STEP), beatN = Math.floor(t / BEAT);
+  const ke = pulse('kick', t, 8), subCol = CYC[beatN % CYC.length];
+  const r = DROP_PARTS[part](lt - part * 8 * BAR, t, s, e8, subCol);
+  if (!CALM) ditherFill(subCol, 0.08 * ke);
+  banner(r.title, 'ALL LAYERS: THE DROP!', subCol, subCol);
+  fact(r.lines, subCol);
+  timeline(r.time);
+}
+
+function sceneOutro(lt, t, sec) {
+  stars(t);
+  const s = Math.floor(t / STEP), op = leadOpen(s);
+  magnetar(X, Y, t, s, { d: 0.3 + 0.7 * op });
+  kickShells(t, s, X, Y, P.kick);
+  banner('THE END', 'ACID LEAD ALONE: FILTER CLOSING', P.lead);
+  fact([`${fmtNum(FRB.ms)} MS. ${FRB.yrs} YEARS OF SUNSHINE.`, { t: 'BRIGHTEST BURSTS SHOWN', c: P.lead }, { t: 'ENERGY ASSUMES ALL DIRECTIONS', c: P.dim }], P.lead);
+  timeline(`RADIO SHIFTED ${fmtBig(SHIFT)} X TO HEAR`);
+}
+
+const SCENES = { pulse: scenePulse, power: scenePower, journey: sceneJourney, detector: sceneDetector, source: sceneSource,
+                 ignite: sceneIgnite, drop: sceneDrop, outro: sceneOutro };
+
+// ---------- main loop ----------
+function frame() {
+  const started = !!ac;
+  let tau = 0;
+  if (started) tau = Math.max(0, ac.currentTime - T0 - (ac.outputLatency || 0));
+  else if (DEBUG_T !== null) tau = DEBUG_T;
+  if (started || DEBUG_T !== null) draw(tau);
+  else {
+    cx.setTransform(1, 0, 0, 1, 0, 0);
+    cx.fillStyle = P.bg; cx.fillRect(0, 0, W, H);
+    sceneTitle(0, performance.now() / 1000, { started });
+  }
+  if (started && ac.state === 'suspended') card([{ t: 'PAUSED', c: P.kick, s: 2 }], 150);
+  requestAnimationFrame(frame);
+}
+
+function draw(tau) {
+  const t = tau % LOOP;
+  const bar = Math.floor(t / BAR), sec = SONG[BAR_SEC[bar]], lt = t - sec.start * BAR;
+
+  cx.setTransform(1, 0, 0, 1, 0, 0);
+  cx.fillStyle = P.bg; cx.fillRect(0, 0, W, H);
+
+  const ke = pulse('kick', t, 12), D = sec.id === 'drop';
+  if (!CALM && D && ke > 0.3) {
+    const s = Math.floor(t / STEP);
+    cx.setTransform(1, 0, 0, 1, Math.round((hash(s) - 0.5) * 4 * ke), Math.round((hash(s + 99) - 0.5) * 4 * ke));
+  }
+  if (sec.id === 'title') sceneTitle(lt, t, { started: true });
+  else SCENES[sec.id](lt, t, sec);
+  cx.setTransform(1, 0, 0, 1, 0, 0);
+  if (sec.id !== 'title') { meter(t); hud(t); }
+
+  if (lt < 0.3 && !D && sec.k > 0) ditherFill(P.bg, 1 - lt / 0.3);
+  const pl = lt % (8 * BAR);
+  if (D && !CALM && pl < 0.3) ditherFill(P.white, 0.8 * (1 - pl / 0.3));
+}
+
+// video export (scene-to-short): one loop of frames and audio, rendered offline on the same clock
+window.__capture = {
+  duration: LOOP,
+  thumb: SONG.find(s => s.id === 'drop').start * BAR + 8 * BAR + 2 * BAR + 6 * STEP,   // host galaxy, between kicks (no flash)
+  frame: tau => draw(tau),
+  async audio(sr = 48000) {
+    const live = ac;
+    ac = new OfflineAudioContext(2, Math.round(LOOP * sr), sr);
+    buildGraph(); master.gain.value = 0.9;
+    for (let s = 0; s < TOTAL_STEPS; s++) playStep(s, s * STEP);
+    const buf = await ac.startRendering();
+    ac = live;
+    return { sampleRate: sr, L: buf.getChannelData(0), R: buf.getChannelData(1) };
+  },
+};
+frame();
+})();
+</script>
+</body>
+</html>
