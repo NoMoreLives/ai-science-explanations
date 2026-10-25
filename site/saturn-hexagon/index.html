@@ -1,0 +1,1097 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Saturn's Hexagon: Liquid Jungle Mix</title>
+<style>
+  html,body{margin:0;height:100%;background:#04050d;color:#6a72a0;font:12px monospace}
+  body{display:flex;flex-direction:column;align-items:center;justify-content:center}
+  canvas{height:min(92vh,calc(100vw*16/9));aspect-ratio:9/16;image-rendering:pixelated;cursor:pointer;background:#04050d}
+  p{margin:6px 16px 0;text-align:center}
+</style>
+</head>
+<body>
+<canvas id="c" width="180" height="320"></canvas>
+<p>click / space: play-pause &middot; m: mute &middot; headphones + volume up &middot; ?bpm=172 &amp;sides=6 &amp;side=14500 (km) &amp;jet=100 (m/s) &amp;calm=1 (no shake/flash)</p>
+<script>
+(() => {
+'use strict';
+
+// ---------- config ----------
+const q = new URLSearchParams(location.search);
+const num = (k, d, lo, hi) => { const n = parseFloat(q.get(k)); return n >= lo && n <= hi ? n : d; };
+const BPM = num('bpm', 172, 150, 190);
+const CALM = q.get('calm') === '1';       // no screen shake or flashes
+const SHORT = q.get('short') === '1';     // YouTube Short: a hit on the first frame
+const DEBUG_T = q.has('t') ? parseFloat(q.get('t')) : null; // freeze visuals at t seconds (no audio)
+
+// the storm; defaults are Cassini/Voyager values. Every number drawn on screen comes from these.
+const HEX = {
+  sides: Math.round(num('sides', 6, 3, 8)),  // lab tanks make 3 to 8
+  lat: 78,                                   // degrees north, the jet's core
+  side: num('side', 14500, 5000, 30000),     // km per side
+  jetMs: num('jet', 100, 20, 300),           // jet stream speed, m/s
+  rotH: 10 + 39 / 60 + 23 / 3600,            // the hexagon's turn (Voyager's radio day), hours
+  eyeKm: 2000, vortexMs: 150,                // the polar hurricane
+  earthEyeKm: 100,                           // NASA: Saturn's eye is ~20x an average hurricane eye
+  seenYear: 1981, goldFrom: 2012, goldTo: 2016, nowYear: 2026,
+  yearYrs: 29.46,                            // one orbit of the sun
+};
+
+const KM_EARTH = 12742, RE_KM = 60268, RP_KM = 54364, RING_KM = 136775; // Earth diameter; Saturn equatorial + polar radius; outer edge of the A ring
+const NS = HEX.sides, SEG = 2 * Math.PI / NS, COSN = Math.cos(Math.PI / NS);
+const R_KM = HEX.side / (2 * Math.sin(Math.PI / NS));   // corner distance from the pole (= the side, for 6)
+const WIDTH_KM = 2 * R_KM, PERIM_KM = NS * HEX.side;
+const LAP_S = PERIM_KM * 1000 / HEX.jetMs, ROT_S = HEX.rotH * 3600;
+const LAP_DAYS = LAP_S / 86400, LAP_SAT = LAP_S / ROT_S;
+const KMH = v => Math.round(v * 3.6);
+const ROT_STR = `${Math.floor(HEX.rotH)}H ${Math.round(HEX.rotH % 1 * 60)}M`;
+const SIDE_WORD = ['', '', '', 'THREE', 'FOUR', 'FIVE', 'SIX', 'SEVEN', 'EIGHT'][NS];
+
+const W = 180, H = 320, X = 90, Y = 112;
+const STEP = 60 / BPM / 4, BAR = STEP * 16, BEAT = STEP * 4;
+// display time: pole views turn with Saturn at 1 bar = 1 Saturn day; globe views spin once every 8 bars
+const POLE_TS = ROT_S / BAR, SAT_TS = ROT_S / (8 * BAR), SAT_SPIN = 2 * Math.PI / (8 * BAR);
+const BAR_MIN = Math.round(ROT_S / 8 / 60);
+// angular speeds (rad per Saturn second) of the jet, the hexagon's inside, the bands outside and the eyewall
+const OMJ = HEX.jetMs / (R_KM * 1000), OMI = OMJ * 0.5, OMO = -OMJ * 0.25, OMV = HEX.vortexMs / (HEX.eyeKm / 2 * 1000);
+
+// the track: one section per stage, each introducing one layer
+const SONG = [
+  { id: 'title', bars: 4 },
+  { id: 'saturn', bars: 8 },  // layer 1: atmospheric pad
+  { id: 'jet', bars: 8 },     // layer 2: amen break
+  { id: 'wave', bars: 8 },    // layer 3: sub bass
+  { id: 'eye', bars: 8 },     // layer 4: ride + ghost hats
+  { id: 'scale', bars: 8 },   // layer 5: bells
+  { id: 'season', bars: 8 },  // breakdown, then snare roll + riser
+  { id: 'drop', bars: 32 },   // everything + reese
+  { id: 'outro', bars: 8 },   // pad + bells
+];
+const BAR_SEC = [];
+{ let a = 0; SONG.forEach((s, k) => { s.start = a; s.k = k; a += s.bars; for (let b = 0; b < s.bars; b++) BAR_SEC.push(k); }); }
+const TOTAL_STEPS = BAR_SEC.length * 16;
+const LOOP = TOTAL_STEPS * STEP;
+
+// F minor: Fm9 Dbmaj7 Ebadd9 Cm7
+const ROOT = [41, 37, 39, 36];
+const PADC = [[56, 60, 63, 67], [56, 60, 61, 65], [55, 58, 63, 65], [55, 58, 60, 63]];
+const BELC = [[65, 68, 72, 75, 79, 80], [65, 68, 72, 73, 77, 80], [63, 67, 70, 75, 77, 79], [63, 67, 70, 72, 75, 79]];
+const BORD = [0, 2, 4, 5, 3, 1];   // corner k of the hexagon plays chord tone BORD[k]
+// chip amen: K kick, S snare, g ghost snare; the 4th bar is the chop
+const BRK = ['K.K.S..g.gKKS..g', 'K.K.S..g.gK.S..g', 'K.K.S..g.gKKS..g', 'K.K.S..gKgS.SgSS'];
+const SUBN = [0, -1, -1, -1, -1, -1, 0, -1, -1, -1, 7, -1, -1, -1, 12, -1];
+
+function at(s) {
+  s = ((s % TOTAL_STEPS) + TOTAL_STEPS) % TOTAL_STEPS;
+  const bar = (s / 16) | 0, sec = SONG[BAR_SEC[bar]];
+  return { s, sec, id: sec.id, lb: bar - sec.start, i: s % 16 };
+}
+
+function brkChar(id, lb, i) {
+  if (id === 'jet') {
+    if (lb < 2) return 'K...S.....K.S...'[i];
+    if (lb < 4) { const c = BRK[lb % 2][i]; return c === 'g' ? '.' : c; }
+    return BRK[lb % 4][i];
+  }
+  if (id === 'wave' || id === 'eye' || id === 'scale') return BRK[lb % 4][i];
+  if (id === 'season') return lb >= 4 && lb < 7 ? 'K.........K.....'[i] : lb === 7 && i === 0 ? 'K' : '.';
+  if (id === 'drop') return lb % 8 === 7 && i >= 12 && lb !== 31 ? (i === 12 ? 'K' : '.') : BRK[lb % 4][i];
+  return '.';
+}
+
+// which bell (and so which hexagon corner) plays on step s, or -1
+function bellIdx(s) {
+  const { s: sn, id, lb, i } = at(s);
+  let iv = 0;
+  if (id === 'scale') iv = lb < 4 ? 4 : 2;
+  else if (id === 'season') iv = lb === 7 && i >= 12 ? 0 : 2;
+  else if (id === 'drop') iv = 2;
+  else if (id === 'outro') iv = 4;
+  return iv && i % iv === 0 ? Math.floor(sn / iv) : -1;
+}
+
+// single source of truth for what plays on step s: audio, HUD and visuals all read this
+function hit(layer, s) {
+  const { id, lb, i } = at(s), ch = lb % 4, D = id === 'drop', e8 = lb % 8, part = lb >> 3;
+  const hush = id === 'season' && lb === 7 && i >= 12;   // the silent beat before the drop
+  const fill = D && e8 === 7 && i >= 12 && lb !== 31;    // snare roll into the next 8
+  switch (layer) {
+    case 'pad': return id === 'title' ? (lb === 0 && i === 0 ? 1 : 0) : i === 0 ? 1 : 0;
+    case 'kick': return brkChar(id, lb, i) === 'K' ? 1 : 0;
+    case 'snare': { const c = brkChar(id, lb, i); return c === 'S' ? 1 : c === 'g' ? 0.3 : 0; }
+    case 'roll':
+      if (id === 'season' && lb >= 4 && !hush) return [i % 4 === 0, i % 2 === 0, true, true][lb - 4] ? 0.35 + 0.65 * ((lb - 4) * 16 + i) / 60 : 0;
+      return fill ? 0.5 + 0.12 * (i - 12) : 0;
+    case 'ride':
+      if (id === 'eye') return lb < 2 ? (i % 4 === 0 ? 1 : 0) : i % 2 === 0 ? (i % 4 === 0 ? 1 : 0.6) : 0;
+      if (id === 'scale' || D) return i % 2 === 0 ? (i % 4 === 0 ? 1 : 0.6) : 0;
+      if (id === 'season' && lb >= 4 && !hush) return i % 4 === 0 ? 0.8 : 0;
+      return 0;
+    case 'hat': return ((id === 'eye' && lb >= 4) || id === 'scale' || D) && i % 2 ? (i % 4 === 3 ? 0.5 : 0.25) : 0;
+    case 'sub':
+      if (id === 'wave' && lb < 4) return i === 0 ? ROOT[ch] : 0;
+      if (id === 'wave' || id === 'eye' || id === 'scale' || D) return SUBN[i] >= 0 ? ROOT[ch] + SUBN[i] : 0;
+      if (id === 'season' && lb >= 4) return i === 0 ? ROOT[ch] : 0;
+      return 0;
+    case 'reese': return D && i === 0 ? ROOT[ch] + 12 : 0;
+    case 'bell': { const k = bellIdx(s); return k < 0 ? 0 : BELC[ch][BORD[k % NS % 6]] + (D && part === 2 ? 12 : 0); }
+    case 'crash': return i === 0 && ((D && e8 === 0) || (id === 'outro' && lb === 0)) ? 1 : 0;
+    case 'brk': return hit('kick', s) || hit('snare', s);
+    case 'snares': return hit('snare', s) || hit('roll', s);
+    case 'subs': return hit('sub', s) || hit('reese', s);
+    case 'rides': return hit('ride', s) || hit('hat', s);
+    case 'fx': return hit('roll', s) || hit('crash', s);
+  }
+  return 0;
+}
+
+const P = {
+  bg: '#04050d', grid: '#10162e', edge: '#2c3760', dim: '#8088b8', fg: '#f0f2ff', shadow: '#000000', white: '#ffffff',
+  pad: '#b9a6ff', padD: '#3b3070', brk: '#ffb03a', brkD: '#6a4510', sub: '#5cf0a0', subD: '#1a5a3c',
+  rde: '#ff6ad5', rdeD: '#5e1f52', bel: '#4cd8ff', belD: '#174f6e', fx: '#ff7a4a', fxD: '#6a2a14',
+  gold: '#e8c070', aurG: '#9dffcf', earth: '#2f6bd8', land: '#3fae5a',
+};
+const CYC = [P.pad, P.brk, P.sub, P.rde, P.bel, P.fx];
+
+// ---------- canvas + gfx helpers ----------
+const cv = document.getElementById('c');
+const cx = cv.getContext('2d');
+cx.imageSmoothingEnabled = false;
+
+// 3x5 pixel font, rows top to bottom
+const FONT = {
+  A:'010 101 111 101 101', B:'110 101 110 101 110', C:'011 100 100 100 011', D:'110 101 101 101 110',
+  E:'111 100 110 100 111', F:'111 100 110 100 100', G:'011 100 101 101 011', H:'101 101 111 101 101',
+  I:'111 010 010 010 111', J:'001 001 001 101 010', K:'101 101 110 101 101', L:'100 100 100 100 111',
+  M:'101 111 111 101 101', N:'110 101 101 101 101', O:'010 101 101 101 010', P:'110 101 110 100 100',
+  Q:'010 101 101 111 011', R:'110 101 110 101 101', S:'011 100 010 001 110', T:'111 010 010 010 010',
+  U:'101 101 101 101 111', V:'101 101 101 101 010', W:'101 101 111 111 101', X:'101 101 010 101 101',
+  Y:'101 101 010 010 010', Z:'111 001 010 100 111',
+  0:'111 101 101 101 111', 1:'010 110 010 010 111', 2:'110 001 010 100 111', 3:'110 001 010 001 110',
+  4:'101 101 111 001 001', 5:'111 100 110 001 110', 6:'011 100 111 101 111', 7:'111 001 010 010 010',
+  8:'111 101 111 101 111', 9:'111 101 111 001 110',
+  '-':'000 000 111 000 000', '.':'000 000 000 000 010', ':':'000 010 000 010 000',
+  '=':'000 111 000 111 000', '+':'000 010 111 010 000', '!':'010 010 010 000 010', '?':'110 001 010 000 010',
+  '>':'100 010 001 010 100', '<':'001 010 100 010 001', '/':'001 001 010 100 100', ',':'000 000 000 010 100',
+  '(':'010 100 100 100 010', ')':'010 001 001 001 010', "'":'010 010 000 000 000', '~':'000 011 110 000 000',
+  '^':'010 101 000 000 000', '#':'101 111 101 111 101', '%':'101 001 010 100 101',
+};
+const GL = {};
+for (const k in FONT) GL[k] = FONT[k].replace(/ /g, '');
+
+const textW = (s, sc) => s.length * 4 * sc - sc;
+function text(s, x, y, col, sc = 1, align = 'l') {
+  s = String(s).toUpperCase();
+  if (align === 'c') x = Math.round(x - textW(s, sc) / 2);
+  else if (align === 'r') x -= textW(s, sc);
+  cx.fillStyle = col;
+  for (let i = 0; i < s.length; i++) {
+    const g = GL[s[i]];
+    if (!g) continue;
+    for (let k = 0; k < 15; k++) {
+      if (g[k] === '1') cx.fillRect(x + i * 4 * sc + (k % 3) * sc, y + ((k / 3) | 0) * sc, sc, sc);
+    }
+  }
+}
+
+// bordered caption box; lines = [{t, c, s}]
+function card(lines, y, cxp = 90, border = P.fg) {
+  let w = 0, h = 4;
+  for (const l of lines) { const s = l.s || 1; w = Math.max(w, textW(String(l.t), s)); h += 5 * s + 3; }
+  w += 10;
+  if (w > W) console.warn('card too wide:', lines.map(l => l.t).join(' / '));
+  const x = Math.round(cxp - w / 2);
+  cx.fillStyle = P.shadow; cx.fillRect(x + 2, y + 2, w, h);
+  cx.fillStyle = P.bg;     cx.fillRect(x, y, w, h);
+  cx.fillStyle = border;
+  cx.fillRect(x, y, w, 1); cx.fillRect(x, y + h - 1, w, 1);
+  cx.fillRect(x, y, 1, h); cx.fillRect(x + w - 1, y, 1, h);
+  let ty = y + 4;
+  for (const l of lines) { const s = l.s || 1; text(l.t, cxp, ty, l.c || P.fg, s, 'c'); ty += 5 * s + 3; }
+  return h;
+}
+
+const BAYER = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
+const bay = (x, y) => BAYER[(y & 3) * 4 + (x & 3)];
+
+function fillCircle(x, y, r, col) {
+  if (r < 0) return;
+  cx.fillStyle = col;
+  for (let dy = -r; dy <= r; dy++) {
+    const dx = Math.floor(Math.sqrt((r + .5) * (r + .5) - dy * dy));
+    cx.fillRect(x - dx, y + dy, 2 * dx + 1, 1);
+  }
+}
+
+// ordered-dither ring/disc, d = 0..1 density
+function ditherCircle(x, y, r0, r1, col, d) {
+  if (d <= 0) return;
+  x = Math.round(x); y = Math.round(y); r1 = Math.round(r1);
+  cx.fillStyle = col;
+  const lvl = d * 16;
+  for (let py = y - r1; py <= y + r1; py++) {
+    if (py < 0 || py >= H) continue;
+    for (let px = x - r1; px <= x + r1; px++) {
+      const dd = (px - x) ** 2 + (py - y) ** 2;
+      if (dd <= r1 * r1 && dd >= r0 * r0 && bay(px, py) < lvl) cx.fillRect(px, py, 1, 1);
+    }
+  }
+}
+
+// thin dithered ring, sampled by angle; sy squashes it into an ellipse
+function ring(x, y, r, col, th, d, sy = 1) {
+  if (d <= 0 || r < 1) return;
+  cx.fillStyle = col;
+  const lvl = d * 16, n = Math.ceil(r * 7) + 8;
+  for (let k = 0; k < n; k++) {
+    const a = k / n * 2 * Math.PI, c = Math.cos(a), s = Math.sin(a);
+    for (let j = 0; j < th; j++) {
+      const px = Math.round(x + c * (r + j)), py = Math.round(y + s * (r + j) * sy);
+      if (bay(px, py) < lvl) cx.fillRect(px, py, 1, 1);
+    }
+  }
+}
+
+function line(x0, y0, x1, y1, col, d = 1) {
+  cx.fillStyle = col;
+  const n = Math.max(Math.abs(x1 - x0), Math.abs(y1 - y0), 1);
+  for (let k = 0; k <= n; k++) {
+    const px = Math.round(x0 + (x1 - x0) * k / n), py = Math.round(y0 + (y1 - y0) * k / n);
+    if (d >= 1 || bay(px, py) < d * 16) cx.fillRect(px, py, 1, 1);
+  }
+}
+
+function arrow(x0, y0, x1, y1, col) {
+  line(x0, y0, x1, y1, col);
+  const a = Math.atan2(y1 - y0, x1 - x0);
+  for (const s of [-1, 1]) line(x1, y1, x1 + 4 * Math.cos(a + s * 2.5), y1 + 4 * Math.sin(a + s * 2.5), col);
+}
+
+function dot(px, py, col, d) {
+  px = Math.round(px); py = Math.round(py);
+  if (bay(px, py) < d * 16) { cx.fillStyle = col; cx.fillRect(px, py, 1, 1); }
+}
+
+// dithered pattern fills: d of a 4x4 tile in col (cached)
+const PAT = {};
+function ditherFill(col, d) {
+  const n = Math.max(0, Math.min(16, Math.round(d * 16)));
+  if (!n) return;
+  const key = col + n;
+  if (!PAT[key]) {
+    const t = document.createElement('canvas'); t.width = t.height = 4;
+    const c = t.getContext('2d'); c.fillStyle = col;
+    for (let i = 0; i < 16; i++) if (BAYER[i] < n) c.fillRect(i % 4, (i / 4) | 0, 1, 1);
+    PAT[key] = cx.createPattern(t, 'repeat');
+  }
+  cx.fillStyle = PAT[key]; cx.fillRect(0, 0, W, H);
+}
+
+function mulberry(a) { return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+const rng = mulberry(1986);
+const hash = n => { n = Math.imul(n ^ 0x5bd1e995, 0x27d4eb2d); n ^= n >>> 15; n = Math.imul(n, 0x85ebca6b); n ^= n >>> 13; return (n >>> 0) / 4294967296; };
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const angDiff = (a, b) => Math.atan2(Math.sin(a - b), Math.cos(a - b));
+
+const smooth = x => { x = clamp(x, 0, 1); return x * x * (3 - 2 * x); };
+
+const STARS = Array.from({ length: 140 }, () => ({ x: rng() * W | 0, y: rng() * H | 0, b: rng() }));
+function stars(t) {
+  STARS.forEach((s, k) => { cx.fillStyle = (k * 7 + Math.floor(t * 6)) % 11 === 0 ? P.fg : s.b > 0.6 ? P.dim : P.edge; cx.fillRect(s.x, s.y, 1, 1); });
+}
+
+// ---------- Saturn, drawn per pixel into an offscreen buffer ----------
+const off = document.createElement('canvas'); off.width = W; off.height = H;
+const octx = off.getContext('2d');
+const img = octx.createImageData(W, H), buf = new Uint32Array(img.data.buffer);
+const U = h => { const n = parseInt(h.slice(1), 16); return (0xff000000 | (n & 0xff) << 16 | (n & 0xff00) | n >> 16) >>> 0; };
+const RAMP = o => o.map(U);
+const BAND_A = RAMP(['#21180f', '#5e4629', '#a8864f', '#dcc187', '#fbeec4']);
+const BAND_B = RAMP(['#1a120c', '#45311f', '#7c5d3c', '#b8936a', '#e2c79c']);
+const HEX_BLUE = RAMP(['#0a1430', '#1b3768', '#3669aa', '#73a4d6', '#c6def6']);
+const HEX_GOLD = RAMP(['#21170a', '#644519', '#b4863a', '#e6be6c', '#fff0b6']);
+const JET_BLUE = RAMP(['#070b1a', '#1c2a4a', '#43598a', '#9ab0d8', '#ffffff']);
+const JET_GOLD = RAMP(['#1a1108', '#473319', '#93733f', '#dcc48a', '#ffffff']);
+const EYE = RAMP(['#040408', '#140f1c', '#2e2234', '#58404c']);
+const WALL = RAMP(['#1c1c2c', '#4e4e6a', '#9c9cbc', '#dcdcf0', '#ffffff']);
+const RING = RAMP(['#15120c', '#4a3f2c', '#94806a', '#d2c4a0', '#f4ecd8']);
+const RING_IN = 1.24, RING_OUT = 2.27;   // C ring to A ring edge, in Saturn radii
+const LV = (() => { const v = [-0.62, 0.55, 0.56], n = Math.hypot(...v); return v.map(c => c / n); })();   // sunlight, view space
+
+function pick(ramp, v, px, py) {
+  const n = ramp.length - 1, x = clamp(v, 0, 0.999) * n, b = Math.floor(x);
+  return ramp[Math.min(n, b + ((BAYER[(py & 3) * 4 + (px & 3)] + 0.5) / 16 < x - b ? 1 : 0))];
+}
+// 1 at a corner, cos(pi/n) mid-side: the polygon's radius at angle a, as a fraction of the corner distance
+function polyF(a) { const x = ((a % SEG) + SEG) % SEG; return COSN / Math.cos(x - SEG / 2); }
+
+let sRamp = BAND_A;
+// belts and zones away from the pole
+function bands(dKm, th, tS) {
+  const a = th + OMO * tS, b = Math.sin(dKm / 2600 + 0.3 * Math.sin(a * 4 + dKm / 5000));
+  sRamp = b > 0.15 ? BAND_A : BAND_B;
+  return 0.42 + 0.14 * b + 0.08 * Math.sin(a * 11 + dKm / 700) + 0.05 * Math.sin(a * 23 - dKm / 350);
+}
+// the north polar cloud tops at dKm from the pole, angle th. S: amp (circle 0 .. polygon 1), gold, rot, tSat, boosts
+function surface(dKm, th, S, px, py) {
+  const r0 = dKm / R_KM, w = Math.exp(-(((r0 - 1) / 0.55) ** 2));
+  const rho = r0 / (1 + (polyF(th - S.rot) - 1) * S.amp * w);
+  const rj = rho + ((BAYER[(py & 3) * 4 + (px & 3)] + 0.5) / 16 - 0.5) * 0.05;   // dithered region edges
+  const re = HEX.eyeKm / 2 / R_KM, tS = S.tSat, gold = BAYER[((py + 1) & 3) * 4 + ((px + 2) & 3)] < S.gold * 16;
+  if (rj < re) { sRamp = EYE; return 0.2 + 0.5 * (rho / re) ** 2; }
+  if (rj < re * 1.9) {
+    const a = th + OMV * tS;
+    sRamp = WALL;
+    return 0.55 + 0.3 * Math.sin(4 * a + 6 * Math.log(rho / re)) + 0.25 * S.eyeBoost - 0.3 * (rho / re - 1);
+  }
+  if (rj < 0.55) {
+    const a = th + OMV * 0.5 * tS;
+    sRamp = gold ? HEX_GOLD : HEX_BLUE;
+    return 0.45 + 0.25 * Math.sin(3 * a + S.spiralK * Math.log(rho / re)) + 0.1 * Math.sin(7 * a + 11 * Math.log(rho) + 1.3);
+  }
+  if (rj < 0.86) {
+    const a = th + OMI * tS;
+    sRamp = gold ? HEX_GOLD : HEX_BLUE;
+    return 0.58 + 0.16 * Math.sin(a * 6 + rho * 30) + 0.12 * Math.sin(a * 11 - rho * 45 + 2);
+  }
+  if (rj < 1.14) {
+    const a = th + OMJ * tS, str = Math.sin(a * 22 + 3 * Math.sin(rho * 25));
+    sRamp = gold ? JET_GOLD : JET_BLUE;
+    return 0.28 + 0.25 * (1 - Math.abs(rho - 1) / 0.14) + (str > 0.55 ? 0.33 : 0) + 0.15 * S.jetBoost;
+  }
+  return bands(dKm, th, tS);
+}
+
+const state = o => Object.assign({ x0: X, y0: Y, kmPx: R_KM / 50, amp: 1, gold: 0, rot: 0, tSat: 0, jetBoost: 0, eyeBoost: 0, spiralK: 6 }, o);
+const blit = (ya, yb) => { octx.putImageData(img, 0, 0, 0, ya, W, yb - ya); cx.drawImage(off, 0, ya, W, yb - ya, 0, ya, W, yb - ya); };
+
+// straight down onto the north pole, turning with Saturn (orthographic)
+function poleView(S, ya = 0, yb = 252) {
+  buf.fill(0, ya * W, yb * W);
+  for (let py = ya; py < yb; py++) for (let px = 0; px < W; px++) {
+    const dx = px + 0.5 - S.x0, dy = py + 0.5 - S.y0, rKm = Math.hypot(dx, dy) * S.kmPx;
+    if (rKm >= RP_KM) continue;
+    const c = Math.asin(rKm / RP_KM), mu = Math.cos(c);
+    const v = surface(RP_KM * c, Math.atan2(dy, dx), S, px, py);
+    buf[py * W + px] = pick(sRamp, v * (0.35 + 0.65 * Math.sqrt(mu)), px, py);
+  }
+  blit(ya, yb);
+}
+// surface distance from the pole -> screen pixels in poleView
+const kmToPx = (dKm, S) => RP_KM * Math.sin(dKm / RP_KM) / S.kmPx;
+// a point on the jet's path (rf scales it in or out)
+function pathPt(a, S, rf = 1) {
+  const r = kmToPx(R_KM * (1 + (polyF(a - S.rot) - 1) * S.amp) * rf, S);
+  return [S.x0 + Math.cos(a) * r, S.y0 + Math.sin(a) * r];
+}
+
+// the whole planet, pole tipped el toward us, with rings and the planet's shadow on them
+function saturnView(S) {
+  const { x0, y0, Rs, el } = S, ce = Math.cos(el), se = Math.sin(el), ext = RING_OUT * Rs;
+  const ya = Math.max(0, Math.floor(y0 - Math.max(Rs, ext * se) - 1)), yb = Math.min(S.yMax ?? 252, Math.ceil(y0 + Math.max(Rs, ext * se) + 1));
+  const xa = Math.max(0, Math.floor(x0 - ext - 1)), xb = Math.min(W, Math.ceil(x0 + ext + 1));
+  if (yb <= ya) return;
+  buf.fill(0, ya * W, yb * W);
+  for (let py = ya; py < yb; py++) for (let px = xa; px < xb; px++) {
+    const x = (px + 0.5 - x0) / Rs, yu = (y0 - py - 0.5) / Rs, q = x * x + yu * yu;
+    const zs = q < 1 ? Math.sqrt(1 - q) : -9;
+    let col = 0;
+    const zr = -yu * ce / se, rr = Math.sqrt(q + zr * zr);
+    if (rr > RING_IN && rr < RING_OUT && zr > zs) {
+      let v, dens = 1;
+      if (rr < 1.53) { v = 0.32; dens = 0.5; }           // C ring: thin
+      else if (rr < 1.95) v = 0.78;                       // B ring: brightest
+      else if (rr < 2.03) { v = 0.12; dens = 0.3; }       // Cassini division
+      else if (rr > 2.2 && rr < 2.215) dens = 0;          // Encke gap
+      else v = 0.58;                                      // A ring
+      if (dens > 0 && BAYER[(py & 3) * 4 + (px & 3)] < dens * 16) {
+        v += 0.1 * Math.sin(rr * 140) + 0.06 * Math.sin(rr * 53);
+        const b = x * LV[0] + yu * LV[1] + zr * LV[2];
+        if (b < 0 && b * b > rr * rr - 1) v *= 0.18;      // in the planet's shadow
+        col = pick(RING, v * (S.ringFade ?? 1), px, py);
+      }
+    }
+    if (!col && zs > -9) {
+      const north = yu * ce + zs * se, front = -yu * se + zs * ce, lat = Math.asin(clamp(north, -1, 1));
+      const th = Math.atan2(x, front) + S.spin, dKm = (Math.PI / 2 - lat) * RP_KM;
+      let v = north > 0 ? surface(dKm, th, S, px, py) : bands(dKm, th, S.tSat);
+      v *= clamp(0.12 + (x * LV[0] + yu * LV[1] + zs * LV[2]), 0.04, 1.1) * (0.6 + 0.4 * zs);
+      col = pick(sRamp, v, px, py);
+    }
+    if (col) buf[py * W + px] = col;
+  }
+  blit(ya, yb);
+}
+// screen position of hexagon corner k on the globe; z < 0 = round the back
+function globeCorner(S, k) {
+  const cv = R_KM / RP_KM, lon = k * SEG - S.spin, cl = Math.sin(cv);
+  const east = cl * Math.sin(lon), front = cl * Math.cos(lon), north = Math.cos(cv);
+  const ce = Math.cos(S.el), se = Math.sin(S.el);
+  return [S.x0 + east * S.Rs, S.y0 - (north * ce - front * se) * S.Rs, north * se + front * ce];
+}
+
+// ---------- overlays that ride on the music ----------
+// a cloud streak racing along the jet for every snare
+function jetStreaks(t, s, S) {
+  const om = OMJ * POLE_TS * 3;
+  for (let k = 0; k < 32; k++) {
+    const st = s - k, v = hit('snares', st);
+    if (!v) continue;
+    const dt = t - st * STEP, life = 1 - dt / 1.6;
+    if (life <= 0) continue;
+    const a0 = hash(st * 13) * 2 * Math.PI, rf = 1 + (hash(st * 7) - 0.5) * 0.12, a = a0 - om * dt;
+    const rpx = kmToPx(R_KM, S), L = Math.round(6 + v * 12);
+    for (let j = 0; j < L; j++) {
+      const [px, py] = pathPt(a + j / rpx, S, rf);
+      dot(px, py, j === 0 && dt < 0.12 ? P.white : P.brk, life * (1 - j / L) * (j ? 0.85 : 1));
+    }
+  }
+}
+// a light at each corner as its bell plays
+function cornerBells(t, s, posOf) {
+  for (let k = 0; k < 12; k++) {
+    const idx = bellIdx(s - k);
+    if (idx < 0) continue;
+    const e = Math.exp(-(t - (s - k) * STEP) * 5), p = posOf(idx % NS);
+    if (!p || e < 0.05) continue;
+    ditherCircle(p[0], p[1], 0, Math.round(2 + 4 * e), P.bel, 0.75 * e);
+    if (e > 0.5) { cx.fillStyle = P.white; cx.fillRect(Math.round(p[0]), Math.round(p[1]), 1, 1); }
+  }
+}
+// auroral oval: flickers on the ride and hats (really ultraviolet)
+function aurora(t, S, e) {
+  for (let k = 0; k < 420; k++) {
+    const a = k / 420 * 2 * Math.PI, rr = R_KM * (1.32 + 0.05 * Math.sin(3 * a + t * 0.6) + 0.025 * Math.sin(8 * a - t * 1.7));
+    const r = kmToPx(rr, S), d = (0.18 + 0.5 * e) * (0.55 + 0.45 * Math.sin(5 * a + t * 2.3));
+    for (let j = 0; j < 4; j++) dot(S.x0 + Math.cos(a) * (r + j), S.y0 + Math.sin(a) * (r + j), j < 2 ? P.aurG : P.rde, d * (1 - j * 0.2));
+  }
+}
+function outline(S, col, d) {
+  for (let k = 0; k < 360; k++) { const [x, y] = pathPt(k / 360 * 2 * Math.PI, S); dot(x, y, col, d); }
+}
+function kickShells(t, s, x0, y0) {
+  for (let k = 0; k < 40; k++) {
+    if (!hit('kick', s - k)) continue;
+    const r = 8 + (t - (s - k) * STEP) * 90;
+    if (r > 140) break;
+    ring(x0, y0, r, CYC[((s - k) >> 2) % CYC.length], 1, 0.35 * (1 - r / 140));
+  }
+}
+
+// Earth: ocean, a couple of continents, atmosphere
+function earth(x, y, r, t) {
+  ditherCircle(x, y, r, r + 2, P.bel, 0.4);
+  fillCircle(x, y, r, P.earth);
+  cx.fillStyle = P.land;
+  for (let py = -r; py <= r; py++) for (let px = -r; px <= r; px++) {
+    if (px * px + py * py > (r - 1) * (r - 1)) continue;
+    const u = px / r + t * 0.05;
+    if (Math.sin(u * 7) * Math.sin(py / r * 5 + 1) + Math.sin(u * 3 + py / r * 2) * 0.5 > 0.55) cx.fillRect(x + px, y + py, 1, 1);
+  }
+}
+
+// ---------- text helpers ----------
+function fmtNum(v) { return v >= 10 ? String(Math.round(v)) : String(Math.round(v * 10) / 10); }
+const fmtBig = v => v >= 1e4 ? Math.round(v).toLocaleString('en-US') : fmtNum(v);
+const banner = (title, sub, col, subCol = P.fg) => card([{ t: title, s: 2, c: col }, { t: sub, c: subCol }], 4, 90, col);
+const fact = (lines, border) => card(lines.map(l => typeof l === 'string' ? { t: l } : l), 200, 90, border);
+const timeline = s => { const w = textW(s, 1) + 6; cx.fillStyle = P.bg; cx.fillRect(90 - (w >> 1), 242, w, 9); text(s, 90, 244, P.dim, 1, 'c'); };
+// text with a 1px black outline, for labels sitting on the planet
+function label(s, x, y, col, align = 'l') {
+  for (const [dx, dy] of [[-1, 0], [1, 0], [0, -1], [0, 1], [1, 1]]) text(s, x + dx, y + dy, P.shadow, 1, align);
+  text(s, x, y, col, 1, align);
+}
+
+// ---------- audio (everything synthesised) ----------
+let ac = null, master, secGain, comp, duck, brkIn, subIn, reeseIn, padIn, belIn, percIn, fxSend, revSend;
+let sq125, sq25, sq50, noiseBuf, T0 = 0, muted = false, step = 0;
+
+const midi = m => 440 * Math.pow(2, (m - 69) / 12);
+// every node made while one step is being scheduled; all are disconnected once that step's last sound ends
+// (Chrome tidies finished notes up by itself, Safari keeps processing them and slows to a crawl)
+let bag = null;
+const track = n => { if (bag) bag.push(n); return n; };
+const G = v => { const g = track(ac.createGain()); g.gain.value = v; return g; };
+const F = (type, f, Q = 0.7) => { const b = track(ac.createBiquadFilter()); b.type = type; b.frequency.value = f; b.Q.value = Q; return b; };
+const chain = (...n) => { for (let i = 0; i < n.length - 1; i++) n[i].connect(n[i + 1]); return n[0]; };
+const pan = v => { const p = track(ac.createStereoPanner()); p.pan.value = v; return p; };
+
+function pulseWave(d) {
+  const N = 64, re = new Float32Array(N), im = new Float32Array(N);
+  for (let n = 1; n < N; n++) {
+    const a = 2 / (n * Math.PI);
+    re[n] = a * Math.sin(n * Math.PI * d) * Math.cos(n * Math.PI * d);
+    im[n] = a * Math.sin(n * Math.PI * d) ** 2;
+  }
+  return ac.createPeriodicWave(re, im);
+}
+function shaper(fn) {
+  const n = 2048, c = new Float32Array(n);
+  for (let i = 0; i < n; i++) c[i] = fn(i / (n - 1) * 2 - 1);
+  const s = ac.createWaveShaper(); s.curve = c; s.oversample = '2x';
+  return s;
+}
+
+function osc(wave, f, t) {
+  const o = track(ac.createOscillator());
+  if (typeof wave === 'string') o.type = wave; else o.setPeriodicWave(wave);
+  o.frequency.setValueAtTime(f, t);
+  return o;
+}
+function env(g, t, vol, atk, dur, hold) {
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.linearRampToValueAtTime(vol, t + atk);
+  if (hold) { g.gain.setValueAtTime(vol, t + dur * hold); }
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+}
+function play(o, t, dur) { o.start(t); o.stop(t + dur + 0.03); }
+
+function buildGraph() {
+  master = G(0.0001);
+  comp = ac.createDynamicsCompressor();
+  comp.threshold.value = -14; comp.knee.value = 6; comp.ratio.value = 5; comp.attack.value = 0.003; comp.release.value = 0.12;
+  secGain = G(0.8); // section level: the drop gets the headroom
+  chain(comp, secGain, master, ac.destination);
+  // sidechain bus: pad, sub and reese pump against the kick
+  duck = G(1); duck.connect(comp);
+  // ping-pong echo, dotted eighth, each side darker than the last
+  const dl = ac.createDelay(1), dr = ac.createDelay(1);
+  dl.delayTime.value = dr.delayTime.value = STEP * 3;
+  const fbl = G(0.4), fbr = G(0.4), lpl = F('lowpass', 3000), lpr = F('lowpass', 2400);
+  fxSend = G(1);
+  const merge = ac.createChannelMerger(2);
+  chain(fxSend, dl, lpl, fbl, dr, lpr, fbr, dl);
+  lpl.connect(merge, 0, 0); lpr.connect(merge, 0, 1);
+  chain(merge, G(0.5), comp);
+  // the atmosphere: a long reverb whose impulse is decaying, darkened noise
+  const len = Math.floor(ac.sampleRate * 2.8), ir = ac.createBuffer(2, len, ac.sampleRate);
+  for (let c = 0; c < 2; c++) {
+    const d = ir.getChannelData(c);
+    let y = 0;
+    for (let i = 0; i < len; i++) { y += 0.3 * (Math.random() * 2 - 1 - y); d[i] = y * Math.pow(1 - i / len, 3) * Math.min(1, i / (ac.sampleRate * 0.012)); }
+  }
+  const conv = ac.createConvolver(); conv.buffer = ir;
+  revSend = G(1);
+  chain(revSend, F('highpass', 250), conv, G(0.7), comp);
+  // the break: dry, plus a 4-bit-ish staircase copy for crunch
+  brkIn = G(1);
+  const bl = F('lowpass', Math.min(12000, ac.sampleRate * 0.45));
+  chain(brkIn, bl, G(0.7), comp);
+  chain(bl, shaper(x => Math.round(x * 7) / 7), G(0.32), comp);
+  subIn = G(1);
+  chain(subIn, F('lowpass', 420), G(0.5), duck);
+  reeseIn = G(1);
+  chain(reeseIn, G(0.3), duck);
+  padIn = G(1);
+  chain(padIn, F('highpass', 180), G(0.42), duck);
+  padIn.connect(G(0.7)).connect(revSend);
+  padIn.connect(G(0.15)).connect(fxSend);
+  belIn = G(1);
+  chain(belIn, G(0.45), comp);
+  belIn.connect(G(0.35)).connect(fxSend);
+  belIn.connect(G(0.4)).connect(revSend);
+  percIn = G(0.8); percIn.connect(comp);
+  sq125 = pulseWave(0.125); sq25 = pulseWave(0.25); sq50 = pulseWave(0.5);
+  noiseBuf = ac.createBuffer(1, ac.sampleRate, ac.sampleRate);
+  const d = noiseBuf.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+}
+
+function noise(t, dur, vol, type, f, dest, Q = 0.8) {
+  const s = track(ac.createBufferSource()); s.buffer = noiseBuf;
+  const b = F(type, f, Q), g = G(1);
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  chain(s, b, g, dest);
+  s.start(t, Math.random() * 0.5); s.stop(t + dur + 0.03);
+}
+
+// jungle kick: short, punchy pitch dive with a pulse click; ducks the pad and bass
+function kick(t, vel) {
+  const o = osc('sine', 180, t), g = G(1);
+  o.frequency.exponentialRampToValueAtTime(52, t + 0.08);
+  env(g, t, vel, 0.001, 0.28, 0.25);
+  chain(o, g, brkIn); play(o, t, 0.28);
+  const c = osc(sq50, 1800, t), cg = G(1); env(cg, t, vel * 0.25, 0.0005, 0.01);
+  chain(c, cg, brkIn); play(c, t, 0.01);
+  duck.gain.setValueAtTime(0.35, t);
+  duck.gain.setTargetAtTime(1, t + 0.02, 0.07);
+}
+// chip snare: a falling triangle body under two bands of noise; full hits splash into the reverb
+function snare(t, vel) {
+  const o = osc('triangle', 260, t), g = G(1);
+  o.frequency.exponentialRampToValueAtTime(180, t + 0.05);
+  env(g, t, vel * 0.55, 0.001, 0.09);
+  chain(o, g, brkIn); play(o, t, 0.09);
+  noise(t, 0.05 + 0.1 * vel, 0.55 * vel, 'bandpass', 3200, brkIn, 0.8);
+  noise(t, 0.04, 0.3 * vel, 'highpass', 7000, brkIn);
+  if (vel > 0.5) noise(t, 0.25, 0.12 * vel, 'bandpass', 2500, revSend, 0.6);
+}
+
+// 808-style metal: six detuned squares, bandpassed; ride, hats and the crash are all made of this
+const METAL = [205.3, 304.4, 369.6, 522.7, 540, 800];
+function metal(t, dur, vol, hp, p = 0, dest = percIn) {
+  const bp = F('bandpass', 10000, 0.9), g = G(1);
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  chain(bp, F('highpass', hp), g, pan(p), dest);
+  for (const f of METAL) { const o = osc('square', f * 1.6, t); o.connect(bp); play(o, t, dur); }
+}
+const ride = (t, vel, p) => metal(t, 0.4, 0.05 + 0.08 * vel, 5000, p);
+const hat = (t, vel, p) => metal(t, 0.03, 0.05 + 0.1 * vel, 8000, p);
+const crash = t => { metal(t, 1.6, 0.3, 4000, -0.3); metal(t + 0.002, 1.4, 0.22, 5000, 0.3, revSend); noise(t, 1.2, 0.16, 'highpass', 6000, percIn); };
+
+// sub: triangle + sine, gliding from the last note
+function sub(t, m, dur, from) {
+  const f = midi(m), g = G(1);
+  env(g, t, 0.9, 0.004, dur, 0.75);
+  chain(g, subIn);
+  for (const [w, v] of [['triangle', 0.8], ['sine', 0.6]]) {
+    const o = osc(w, from ? midi(from) : f, t);
+    if (from) o.frequency.exponentialRampToValueAtTime(f, t + 0.06);
+    chain(o, G(v), g); play(o, t, dur);
+  }
+}
+// reese: two detuned 50% pulses, spread, through a slowly opening filter
+function reese(t, m, dur) {
+  const lp = F('lowpass', 250, 3), g = G(1);
+  lp.frequency.setValueAtTime(250, t); lp.frequency.linearRampToValueAtTime(1100, t + dur * 0.5); lp.frequency.linearRampToValueAtTime(350, t + dur);
+  env(g, t, 0.5, 0.05, dur, 0.85);
+  chain(lp, g, reeseIn);
+  for (const det of [-16, 16]) { const o = osc(sq50, midi(m), t); o.detune.value = det; chain(o, G(0.5), pan(det / 40), lp); play(o, t, dur); }
+}
+// atmospheric pad: each chord tone a triangle + detuned 25% pulse + a thin 12.5% shimmer an octave up, slow swell
+function atmoPad(t, notes, dur, vol) {
+  const rel = 0.9, lp = F('lowpass', 600, 1.4), g = G(1);
+  lp.frequency.setValueAtTime(500, t); lp.frequency.linearRampToValueAtTime(2400, t + Math.min(dur, 0.9)); lp.frequency.exponentialRampToValueAtTime(700, t + dur + rel);
+  g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(vol, t + Math.min(0.45, dur * 0.4));
+  g.gain.setValueAtTime(vol, t + dur); g.gain.exponentialRampToValueAtTime(0.0001, t + dur + rel);
+  chain(lp, g, padIn);
+  notes.forEach((m, k) => {
+    const p = pan((k / (notes.length - 1) - 0.5) * 0.9);
+    p.connect(lp);
+    for (const [w, mul, det, v] of [['triangle', 1, 4, 1], [sq25, 1, -9, 0.35], [sq125, 2, 7, 0.12]]) {
+      const o = osc(w, midi(m) * mul, t); o.detune.value = det; chain(o, G(v), p); play(o, t, dur + rel);
+    }
+  });
+}
+// bell: sine + an inharmonic 2.76x partial + a 12.5% glint; panned to its corner of the hexagon
+function bell(t, m, vol, p) {
+  const f = midi(m), g = G(1);
+  env(g, t, vol, 0.002, 0.9);
+  chain(g, pan(p), belIn);
+  for (const [w, mul, v] of [['sine', 1, 1], ['sine', 2.76, 0.3], [sq125, 2, 0.07]]) { const o = osc(w, f * mul, t); chain(o, G(v), g); play(o, t, 0.9); }
+}
+// sub boom on the big downbeats
+function impact(t) {
+  const o = osc('sine', 120, t), g = G(1);
+  o.frequency.exponentialRampToValueAtTime(30, t + 1.2);
+  env(g, t, 0.8, 0.003, 1.4, 0.15);
+  chain(o, g, brkIn); play(o, t, 1.4);
+}
+function riser(t, dur, vol) {
+  const s = track(ac.createBufferSource()); s.buffer = noiseBuf; s.loop = true;
+  const bp = F('bandpass', 400, 3), g = G(1);
+  bp.frequency.setValueAtTime(400, t); bp.frequency.exponentialRampToValueAtTime(11000, t + dur);
+  g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(vol, t + dur - 0.01); g.gain.linearRampToValueAtTime(0.0001, t + dur);
+  chain(s, bp, g, percIn); s.start(t); s.stop(t + dur + 0.02);
+}
+// scene change: two falling triangle chimes
+function chime(t) {
+  for (const [f, d] of [[2093, 0], [1568, 0.07]]) {
+    const o = osc('triangle', f, t + d), g = G(1); env(g, t + d, 0.1, 0.002, 0.25);
+    chain(o, g, percIn); g.connect(fxSend); play(o, t + d, 0.25);
+  }
+}
+
+// steps until the next hit of layer (max 16), and the last note before s
+function gapAfter(layer, s) { let n = 1; while (n < 16 && !hit(layer, s + n)) n++; return n; }
+function noteBefore(layer, s) { for (let k = 1; k <= 16; k++) { const m = hit(layer, s - k); if (m) return m; } return 0; }
+
+function playStep(s, t) {
+  bag = [];
+  voices(s, t);
+  const nodes = bag, srcs = nodes.filter(n => typeof n.stop === 'function');
+  bag = null;
+  let left = srcs.length;
+  for (const n of srcs) n.onended = () => { if (--left === 0) for (const m of nodes) m.disconnect(); };
+}
+
+function voices(s, t) {
+  const { id, lb, i } = at(s), ch = lb % 4, D = id === 'drop', e8 = lb % 8;
+  if (i === 0) secGain.gain.setValueAtTime(D ? 1 : 0.8, t);
+  if (i === 0 && lb === 0 && !D && id !== 'title' && id !== 'outro') chime(t);
+  if (id === 'title' && lb === 0 && i === 0) riser(t, BAR * 4, 0.45);
+  if (SHORT && s === 0) { impact(t); kick(t, 1); crash(t); sub(t, ROOT[0], STEP * 6); atmoPad(t, PADC[0], BAR, 0.1); } // the Short can't open on a quiet riser
+  if (id === 'season' && lb === 4 && i === 0) riser(t, BAR * 3.75, 1.3);
+  if (D && e8 === 7 && i === 0 && lb !== 31) riser(t, BAR * 0.97, 0.6);
+  if (i === 0 && ((D && e8 === 0) || (id === 'outro' && lb === 0))) impact(t);
+  if (hit('pad', s)) atmoPad(t, PADC[ch], id === 'title' ? BAR * 3.6 : id === 'season' && lb === 7 ? BAR * 0.7 : BAR, id === 'title' ? 0.08 : D ? 0.09 : 0.12);
+  if (hit('kick', s)) kick(t, 1);
+  const sn = hit('snare', s); if (sn) snare(t, sn);
+  const rl = hit('roll', s); if (rl) snare(t, rl * 0.8);
+  const rd = hit('ride', s); if (rd) ride(t, rd, i % 4 ? 0.3 : -0.1);
+  const ht = hit('hat', s); if (ht) hat(t, ht, i % 4 === 3 ? -0.35 : 0.35);
+  const sb = hit('sub', s);
+  if (sb) { const n = id === 'season' && lb === 7 ? 12 : gapAfter('sub', s), pv = noteBefore('sub', s); sub(t, sb, n * STEP * 0.97, pv && pv !== sb ? pv : 0); }
+  const rs = hit('reese', s); if (rs) reese(t, rs, BAR * 0.98);
+  const bl = hit('bell', s); if (bl) bell(t, bl, D ? 0.16 : 0.18, Math.cos(bellIdx(s) % NS * SEG) * 0.6);
+  if (hit('crash', s)) crash(t);
+}
+
+function schedule() {
+  if (ac.state !== 'running') return;
+  const now = ac.currentTime;
+  while (T0 + step * STEP < now + 0.15) {
+    const t = T0 + step * STEP;
+    if (t > now - 0.02) playStep(step, t); // skip steps missed while the tab was throttled
+    step++;
+  }
+}
+
+function startAudio() {
+  ac = new (window.AudioContext || window.webkitAudioContext)();
+  buildGraph();
+  T0 = ac.currentTime + 0.2; step = 0;
+  setInterval(schedule, 25); schedule();
+  master.gain.setTargetAtTime(muted ? 0.0001 : 0.9, ac.currentTime, 0.2);
+  ac.resume();
+}
+
+// offline render for checking levels without ears: __render(fromBar, bars) -> per-bar peak/rms
+window.__render = async (bar0, bars, sr = 22050) => {
+  ac = new OfflineAudioContext(2, Math.ceil((bars * BAR + 1) * sr), sr);
+  buildGraph(); master.gain.value = 0.9;
+  for (let s = bar0 * 16; s < (bar0 + bars) * 16; s++) playStep(s, 0.05 + (s - bar0 * 16) * STEP);
+  const buf = await ac.startRendering();
+  ac = null;
+  const L = buf.getChannelData(0), out = [];
+  for (let b = 0; b < bars; b++) {
+    let pk = 0, sum = 0, n = 0;
+    for (let i = Math.floor((0.05 + b * BAR) * sr); i < Math.floor((0.05 + (b + 1) * BAR) * sr); i++) { const v = Math.abs(L[i]); pk = Math.max(pk, v); sum += v * v; n++; }
+    const s = SONG[BAR_SEC[bar0 + b]];
+    out.push({ bar: bar0 + b, sec: s.id, lb: bar0 + b - s.start, peak: +pk.toFixed(3), rms: +Math.sqrt(sum / n).toFixed(3) });
+  }
+  return out;
+};
+window.__song = () => SONG.map(s => ({ id: s.id, start: s.start * BAR, bars: s.bars }));
+window.__phys = () => ({ R_KM, WIDTH_KM, earthsAcross: WIDTH_KM / KM_EARTH, PERIM_KM, LAP_DAYS, LAP_SAT, ROT_STR, jetKmh: KMH(HEX.jetMs),
+  vortexKmh: KMH(HEX.vortexMs), eyeRatio: HEX.eyeKm / HEX.earthEyeKm, saturnEarths: 2 * RE_KM / KM_EARTH, barMin: BAR_MIN,
+  poleBarHrs: ROT_S / 3600, jetPxPerSec50: OMJ * POLE_TS * 50, eyewallRevPerBar: OMV * ROT_S / (2 * Math.PI) });
+
+function toggle() {
+  if (!ac) { startAudio(); return; }
+  if (ac.state === 'running') ac.suspend(); else ac.resume();
+}
+function toggleMute() {
+  muted = !muted;
+  if (ac) master.gain.setTargetAtTime(muted ? 0.0001 : 0.9, ac.currentTime, 0.1);
+}
+cv.addEventListener('click', toggle);
+addEventListener('keydown', e => {
+  if (e.code === 'Space') { e.preventDefault(); toggle(); }
+  else if (e.key === 'm' || e.key === 'M') toggleMute();
+});
+
+// ---------- visual envelopes, read from the same hit() table ----------
+function since(layer, t, back = 64) {
+  const s = Math.floor(t / STEP);
+  for (let k = 0; k < back; k++) if (hit(layer, s - k)) return t - (s - k) * STEP;
+  return 99;
+}
+const pulse = (layer, t, rate = 10) => Math.exp(-since(layer, t) * rate);
+const secDur = sec => sec.bars * BAR;
+const lb = lt => Math.floor(lt / BAR);
+
+// ---------- HUD: the live step sequencer ----------
+const ROWS = [['PAD', 'pad', P.pad, P.padD], ['BRK', 'brk', P.brk, P.brkD], ['SUB', 'subs', P.sub, P.subD],
+              ['RDE', 'rides', P.rde, P.rdeD], ['BEL', 'bell', P.bel, P.belD], ['FX', 'fx', P.fx, P.fxD]];
+function hud(t) {
+  const s = Math.floor(t / STEP), b0 = s - (s % 16), cur = s % 16, y0 = 257;
+  cx.fillStyle = P.shadow; cx.fillRect(6, y0 - 1, 172, 60);
+  cx.fillStyle = P.bg; cx.fillRect(4, y0 - 3, 172, 60);
+  cx.fillStyle = P.edge;
+  cx.fillRect(4, y0 - 3, 172, 1); cx.fillRect(4, y0 + 56, 172, 1); cx.fillRect(4, y0 - 3, 1, 60); cx.fillRect(175, y0 - 3, 1, 60);
+  ROWS.forEach(([lab, layer, col, dark], r) => {
+    const y = y0 + 1 + r * 9;
+    let active = false;
+    for (let i = 0; i < 16 && !active; i++) if (hit(layer, b0 + i)) active = true;
+    text(lab, 8, y, active ? (pulse(layer, t, 8) > 0.4 ? P.fg : col) : P.edge);
+    for (let i = 0; i < 16; i++) {
+      const on = hit(layer, b0 + i), x = 22 + i * 9;
+      cx.fillStyle = on ? (i === cur ? P.white : col) : active ? P.grid : '#0a1024';
+      cx.fillRect(x, y, 8, 5);
+    }
+  });
+  cx.fillStyle = P.fg; cx.fillRect(22 + cur * 9, y0 + 55, 8, 1); // playhead
+}
+
+// the last bar of a build: 3, 2, 1 on the first three beats, -1 = silent beat, 0 = not the last bar
+function countdownN(lt, sec) {
+  if (lb(lt) !== sec.bars - 1) return 0;
+  const beat = Math.floor((lt % BAR) / BEAT);
+  return beat === 3 ? -1 : 3 - beat;
+}
+
+// ---------- scenes ----------
+const poleS = (t, o) => state(Object.assign({ tSat: t * POLE_TS, jetBoost: pulse('kick', t, 8), eyeBoost: pulse('rides', t, 10) }, o));
+
+function sceneTitle(lt, t, ctl) {
+  stars(t);
+  saturnView(state({ y0: 150, Rs: 28, el: 0.42, spin: t * SAT_SPIN, tSat: t * SAT_TS, yMax: 200 }));
+  card([{ t: "SATURN'S", s: 3, c: P.gold }, { t: 'HEXAGON', s: 3, c: P.bel }, { t: `LIQUID JUNGLE CHIP MIX - ${BPM} BPM`, c: P.dim }], 34);
+  text(`5 LAYERS. ${NS} SIDES. 1 DROP.`, 90, 216, P.dim, 1, 'c');
+  const on = ((t * 2) | 0) % 2 === 0;   // song time when playing; the not-started card is passed wall-clock seconds
+  if (!ctl.started) {
+    if (on) card([{ t: 'TAP TO START', c: P.bel, s: 2 }], 250);
+    text('HEADPHONES + VOLUME UP', 90, 290, P.edge, 1, 'c');
+  } else if (on) card([{ t: 'A STORM THAT NEVER ENDS', c: P.bel }], 250);
+}
+
+function sceneSaturn(lt, t, sec) {
+  stars(t);
+  const bar = lb(lt), p = smooth(lt / (6 * BAR)), el = 0.1 + 0.95 * p, pe = pulse('pad', t, 2);
+  const S = state({ Rs: 38, el, spin: t * SAT_SPIN, tSat: t * SAT_TS });
+  ditherCircle(X, Y, 38, 50, P.padD, 0.1 + 0.2 * pe);
+  saturnView(S);
+  if (p > 0.6) {
+    const py = Math.round(Y - 38 * Math.cos(el));
+    line(X + 3, py - 2, 128, 48, P.pad, 0.8);
+    label('HEXAGON', 130, 44, P.pad);
+  }
+  banner('1. SATURN', 'LAYER 1: ATMOS PAD', P.pad);
+  fact(bar < 4 ? [`SATURN: ${fmtNum(2 * RE_KM / KM_EARTH)} EARTHS WIDE`, { t: 'A BALL OF HYDROGEN + HELIUM', c: P.pad }, { t: 'RINGS OF WATER ICE', c: P.dim }]
+               : [`AT ITS NORTH POLE, ~${HEX.lat} DEG N:`, { t: `A ${SIDE_WORD}-SIDED STORM`, c: P.pad }, { t: `FIRST SEEN BY VOYAGER, ${HEX.seenYear}`, c: P.dim }], P.pad);
+  timeline(`1 BAR = ${BAR_MIN} MIN. COLOURS ENHANCED`);
+}
+
+function sceneJet(lt, t, sec) {
+  const bar = lb(lt), s = Math.floor(t / STEP), S = poleS(t, { amp: 0 });
+  poleView(S);
+  jetStreaks(t, s, S);
+  const top = Math.round(Y - kmToPx(R_KM, S)) - 8;
+  arrow(X + 12, top, X - 12, top, P.brk);
+  label('EAST', X, top - 8, P.brk, 'c');
+  banner('2. THE JET STREAM', 'LAYER 2: AMEN BREAK', P.brk);
+  fact(bar < 4 ? ['A JET STREAM CIRCLES THE POLE', { t: `${HEX.jetMs} M/S = ${KMH(HEX.jetMs)} KM/H`, c: P.brk }, { t: `AT ~${HEX.lat} DEG NORTH, BLOWING EAST`, c: P.dim }]
+               : ['SNARE = A STREAK OF CLOUD', { t: `ONE LAP: ${fmtNum(LAP_DAYS)} EARTH DAYS`, c: P.brk }, { t: `= ${Math.round(LAP_SAT)} SATURN DAYS`, c: P.dim }], P.brk);
+  timeline('FROM ABOVE THE POLE. 1 BAR = 1 SATURN DAY');
+}
+
+function sceneWave(lt, t, sec) {
+  const bar = lb(lt), s = Math.floor(t / STEP), amp = smooth(lt / (6 * BAR)) * (1 + 0.15 * pulse('sub', t, 5) * (1 - smooth(lt / (7 * BAR))));
+  const S = poleS(t, { amp });
+  poleView(S);
+  jetStreaks(t, s, S);
+  if (bar >= 4) {   // inset: a spinning tank of water makes the same shape
+    const ix = 152, iy = 58;
+    cx.fillStyle = P.shadow; cx.fillRect(ix - 19, iy - 17, 40, 44);
+    cx.fillStyle = P.bg; cx.fillRect(ix - 21, iy - 19, 40, 44);
+    ring(ix - 1, iy, 14, P.dim, 1, 0.7);
+    for (let k = 0; k < 90; k++) { const a = k / 90 * 2 * Math.PI, r = 11 * polyF(a - t * 1.2); dot(ix - 1 + Math.cos(a) * r, iy + Math.sin(a) * r, P.sub, 1); }
+    text('LAB TANK', ix - 1, iy + 18, P.sub, 1, 'c');
+  }
+  banner('3. THE WAVE', 'LAYER 3: SUB BASS', P.sub);
+  fact(bar < 4 ? ['THE JET STARTS TO WOBBLE', { t: `A ROSSBY WAVE WITH ${NS} LOBES`, c: P.sub }, { t: 'SUB NOTE = A PUSH ON THE WAVE', c: P.dim }]
+               : [`IT LOCKS INTO A ${NS === 6 ? 'HEXAGON' : NS + '-GON'}`, { t: 'THE SHAPE STANDS STILL...', c: P.sub }, { t: '...THE WIND FLOWS THROUGH IT', c: P.dim }], P.sub);
+  timeline(bar < 4 ? 'FROM ABOVE THE POLE. 1 BAR = 1 SATURN DAY' : 'INSET: SPUN WATER MAKES POLYGONS TOO');
+}
+
+function eyeLabel(S) {
+  const r = HEX.eyeKm / 2 / S.kmPx;
+  ring(X, Y, r + 2, P.rde, 1, 0.8);
+  label(`${fmtBig(HEX.eyeKm)} KM`, Math.round(X + r + 6), Y - 2, P.rde);
+}
+
+function sceneEye(lt, t, sec) {
+  const bar = lb(lt), kmPx = R_KM / 50 * Math.pow(0.16, smooth(lt / (7 * BAR)));
+  const S = poleS(t, { kmPx });
+  poleView(S);
+  eyeLabel(S);
+  banner('4. THE EYE', 'LAYER 4: RIDE + HATS', P.rde);
+  fact(bar < 4 ? ['AT THE CENTRE: A HURRICANE', { t: `ITS EYE: ${fmtBig(HEX.eyeKm)} KM ACROSS`, c: P.rde }, { t: `~${fmtNum(HEX.eyeKm / HEX.earthEyeKm)}X A HURRICANE EYE ON EARTH`, c: P.dim }]
+               : [`EYEWALL WINDS: ${HEX.vortexMs} M/S`, { t: `= ${KMH(HEX.vortexMs)} KM/H`, c: P.rde }, { t: 'RIDE = THE CLOUD BANDS SPIN', c: P.dim }], P.rde);
+  timeline('ZOOMING IN. 1 BAR = 1 SATURN DAY');
+}
+
+function sceneScale(lt, t, sec) {
+  const bar = lb(lt), s = Math.floor(t / STEP), S = poleS(t, {});
+  poleView(S);
+  outline(S, P.bel, 0.35);
+  if (bar < 4) {   // ruler along one side, pushed out from the hexagon
+    const [ax, ay] = pathPt(SEG * 4, S, 1.18), [bx, by] = pathPt(SEG * 5, S, 1.18);
+    line(ax, ay, bx, by, P.bel);
+    label(`${fmtBig(HEX.side)} KM`, Math.round((ax + bx) / 2) + 4, Math.round((ay + by) / 2) - 9, P.bel);
+  } else {
+    const er = Math.round(KM_EARTH / 2 / S.kmPx);
+    earth(X - er, Y, er, t); earth(X + er, Y, er, t);
+    label('EARTHS TO SCALE', X, Y + er + 6, P.fg, 'c');
+  }
+  cornerBells(t, s, k => pathPt(k * SEG, S));
+  banner('5. HOW BIG?', 'LAYER 5: BELLS', P.bel);
+  fact(bar < 4 ? [`EACH SIDE: ${fmtBig(HEX.side)} KM`, { t: 'LONGER THAN EARTH IS WIDE', c: P.bel }, { t: 'BELL = ONE CORNER LIGHTS UP', c: P.dim }]
+               : [`${fmtNum(WIDTH_KM / KM_EARTH)} EARTHS FIT ACROSS IT`, { t: `IT TURNS ONCE IN ${ROT_STR}`, c: P.bel }, { t: "MATCHING SATURN'S RADIO DAY", c: P.dim }], P.bel);
+  timeline('SIZES TO SCALE. 1 BAR = 1 SATURN DAY');
+}
+
+function hexFlash(t) {
+  ditherCircle(X, Y, 20, 80, P.gold, 0.3);
+  const S = state({});
+  for (let k = 0; k < 720; k++) { const [x, y] = pathPt(k / 720 * 2 * Math.PI, S); cx.fillStyle = P.white; cx.fillRect(Math.round(x), Math.round(y), 2, 2); }
+  text('FULL STORM', X, 172, P.white, 2, 'c');
+}
+
+function sceneSeason(lt, t, sec) {
+  const n = countdownN(lt, sec);
+  if (n < 0) { hexFlash(t); return; }
+  const bar = lb(lt), s = Math.floor(t / STEP), g = smooth(lt / (4 * BAR)), S = poleS(t, { gold: g });
+  poleView(S);
+  jetStreaks(t, s, S);
+  cornerBells(t, s, k => pathPt(k * SEG, S));
+  const span = HEX.goldTo - HEX.goldFrom;
+  card([{ t: String(Math.round(HEX.goldFrom + span * g)), s: 2, c: P.gold }], 170, X, P.gold);
+  banner('6. SEASONS', bar < 4 ? 'BREAKDOWN: PAD + BELLS' : 'BUILD: SNARE ROLL + RISER', P.fx);
+  fact(bar < 4 ? ['NORTHERN SPRING INTO SUMMER', { t: 'THE HEXAGON TURNS GOLD', c: P.gold }, { t: `CASSINI SAW IT: ${HEX.goldFrom}-${HEX.goldTo}`, c: P.dim }]
+               : ['SUNLIGHT BREWS A HAZE (SMOG)', { t: `A SATURN YEAR = ${HEX.yearYrs} EARTH YRS`, c: P.fx }, { t: 'AND THE STORM RAGES ON...', c: P.dim }], P.fx);
+  timeline(`COLOUR CHANGE: 1 BAR = ${fmtNum(span / 4)} EARTH YEAR`);
+  if (n > 0) { text(String(n), X + 2, 92, P.shadow, 6, 'c'); text(String(n), X, 90, P.white, 6, 'c'); }
+}
+
+// --- the drop: four 8-bar parts ---
+function dropHex(plt, t, s, e8) {
+  const S = poleS(t, { kmPx: R_KM / 56, gold: 1 });
+  poleView(S);
+  kickShells(t, s, X, Y);
+  aurora(t, S, pulse('rides', t, 9));
+  jetStreaks(t, s, S);
+  cornerBells(t, s, k => pathPt(k * SEG, S));
+  return { title: '7. THE HEXAGON',
+    lines: e8 < 4 ? [`A JET STREAM BENT INTO ${NS} WAVES`, { t: 'THE SHAPE STANDS STILL', c: P.gold }, { t: 'THE WIND RACES THROUGH IT', c: P.dim }]
+                  : [{ t: 'AURORA ROUND THE POLE', c: P.rde }, 'SNARE = CLOUD STREAK', { t: 'BELL = CORNER. KICK = GUST', c: P.dim }],
+    time: 'AURORA IS REALLY UV. 1 BAR = 1 SATURN DAY' };
+}
+
+function globeBells(t, s, S) { cornerBells(t, s, k => { const c = globeCorner(S, k); return c[2] > 0 ? c : null; }); }
+
+function dropAbove(plt, t, s, e8) {
+  stars(t);
+  const S = state({ Rs: 50, y0: 118, el: 1.1 + 0.06 * Math.sin(plt * 0.4), spin: t * SAT_SPIN, tSat: t * SAT_TS, gold: 1, eyeBoost: pulse('rides', t, 10) });
+  ditherCircle(X, 118, 50, 60, P.gold, 0.08 + 0.12 * pulse('pad', t, 2));
+  saturnView(S);
+  globeBells(t, s, S);
+  return { title: '8. ABOVE SATURN',
+    lines: e8 < 4 ? [`IT TURNS ONCE EVERY ${ROT_STR}`, { t: 'AND KEEPS ITS SHAPE', c: P.gold }, { t: 'A STANDING WAVE', c: P.dim }]
+                  : [{ t: `RINGS: ${fmtBig(RING_KM * 2)} KM ACROSS`, c: P.gold }, 'BUT MOSTLY ~10 M THICK', { t: 'CHUNKS OF WATER ICE', c: P.dim }],
+    time: `1 BAR = ${BAR_MIN} MIN. COLOURS ENHANCED` };
+}
+
+function dropEye(plt, t, s, e8) {
+  const z = Math.pow(0.11, smooth(plt / (7.5 * BAR))), S = poleS(t, { kmPx: R_KM / 56 * z, gold: 1, spiralK: 6 + 4 * pulse('kick', t, 6) });
+  poleView(S);
+  kickShells(t, s, X, Y);
+  if (z < 0.5) eyeLabel(S);
+  return { title: '9. INTO THE EYE',
+    lines: e8 < 4 ? ['DIVING INTO THE EYE', { t: `${fmtBig(HEX.eyeKm)} KM ACROSS`, c: P.rde }, { t: `WINDS ${KMH(HEX.vortexMs)} KM/H`, c: P.dim }]
+                  : ['A HURRICANE WITH NO LAND', { t: 'NOTHING TO SLOW IT DOWN', c: P.rde }, { t: 'IT JUST KEEPS SPINNING', c: P.dim }],
+    time: 'ZOOMING IN. 1 BAR = 1 SATURN DAY' };
+}
+
+function dropRaging(plt, t, s, e8) {
+  stars(t);
+  const Rs = 90 * Math.pow(34 / 90, smooth(plt / (7 * BAR)));
+  const S = state({ Rs, y0: Y + Math.round((Rs - 34) * 0.35), el: 0.8, spin: t * SAT_SPIN, tSat: t * SAT_TS, gold: 1, eyeBoost: pulse('rides', t, 10) });
+  saturnView(S);
+  globeBells(t, s, S);
+  const yrs = HEX.nowYear - HEX.seenYear;
+  return { title: '10. STILL RAGING',
+    lines: e8 < 4 ? [`SEEN SINCE ${HEX.seenYear}: ${yrs}+ YEARS`, { t: 'AND STILL RAGING', c: P.gold }, { t: 'NO HEXAGON AT THE SOUTH POLE', c: P.dim }]
+                  : [`WHY ${SIDE_WORD}? THE JET'S SPEED`, { t: 'AND WIDTH PICK HOW MANY', c: P.gold }, { t: 'WAVES FIT ROUND THE POLE', c: P.dim }],
+    time: `1 BAR = ${BAR_MIN} MIN. COLOURS ENHANCED` };
+}
+
+const DROP_PARTS = [dropHex, dropAbove, dropEye, dropRaging];
+function sceneDrop(lt, t, sec) {
+  const bar = lb(lt), part = bar >> 3, e8 = bar % 8, s = Math.floor(t / STEP), beatN = Math.floor(t / BEAT);
+  const ke = pulse('kick', t, 8), plt = lt - part * 8 * BAR;
+  const r = DROP_PARTS[part](plt, t, s, e8);
+  if (!CALM) ditherFill(CYC[beatN % CYC.length], 0.06 * ke);
+  const subCol = CYC[beatN % CYC.length];
+  banner(r.title, 'ALL LAYERS + REESE: THE DROP!', subCol, subCol);
+  fact(r.lines, subCol);
+  timeline(r.time);
+}
+
+function sceneOutro(lt, t, sec) {
+  stars(t);
+  const p = lt / secDur(sec), s = Math.floor(t / STEP);
+  const S = state({ Rs: 30, y0: 116, el: 0.75, spin: t * SAT_SPIN, tSat: t * SAT_TS, gold: 1, yMax: 196 });
+  saturnView(S);
+  globeBells(t, s, S);
+  if (p > 0.5) ditherFill(P.bg, Math.min(0.9, (p - 0.5) * 2.2));
+  banner('THE END', 'LAYER 1 AGAIN: PAD + BELLS', P.pad);
+  fact([`RAGING SINCE AT LEAST ${HEX.seenYear}`, { t: 'NO ONE KNOWS IF IT WILL EVER STOP', c: P.pad }], P.pad);
+  text('COLOURS ENHANCED. AURORA IS REALLY UV', X, 228, P.edge, 1, 'c');
+  text('TIME SPED UP. CLOUD STREAKS SCHEMATIC', X, 236, P.edge, 1, 'c');
+}
+
+const SCENES = { title: sceneTitle, saturn: sceneSaturn, jet: sceneJet, wave: sceneWave, eye: sceneEye, scale: sceneScale,
+                 season: sceneSeason, drop: sceneDrop, outro: sceneOutro };
+
+// ---------- main loop ----------
+function frame() {
+  const started = !!ac;
+  let tau = 0;
+  if (started) tau = Math.max(0, ac.currentTime - T0 - (ac.outputLatency || 0));
+  else if (DEBUG_T !== null) tau = DEBUG_T;
+  if (started || DEBUG_T !== null) draw(tau);
+  else {
+    cx.setTransform(1, 0, 0, 1, 0, 0);
+    cx.fillStyle = P.bg; cx.fillRect(0, 0, W, H);
+    sceneTitle(0, performance.now() / 1000, { started });
+  }
+  if (started && ac.state === 'suspended') card([{ t: 'PAUSED', c: P.bel, s: 2 }], 150);
+  requestAnimationFrame(frame);
+}
+
+function draw(tau) {
+  const t = tau % LOOP;
+  const bar = Math.floor(t / BAR), sec = SONG[BAR_SEC[bar]], lt = t - sec.start * BAR;
+
+  cx.setTransform(1, 0, 0, 1, 0, 0);
+  cx.fillStyle = P.bg; cx.fillRect(0, 0, W, H);
+
+  const ke = pulse('kick', t, 12), D = sec.id === 'drop';
+  if (!CALM && D && ke > 0.3) {
+    const s = Math.floor(t / STEP);
+    cx.setTransform(1, 0, 0, 1, Math.round((hash(s) - 0.5) * 3 * ke), Math.round((hash(s + 99) - 0.5) * 3 * ke));
+  }
+  if (sec.id === 'title') sceneTitle(lt, t, { started: true });
+  else SCENES[sec.id](lt, t, sec);
+  cx.setTransform(1, 0, 0, 1, 0, 0);
+  if (sec.id !== 'title') hud(t);
+
+  if (lt < 0.3 && !D && sec.k > 0) ditherFill(P.bg, 1 - lt / 0.3);
+  const pl = lt % (8 * BAR);
+  if (D && !CALM && pl < 0.3) ditherFill(P.white, 0.8 * (1 - pl / 0.3));
+}
+
+// video export (scene-to-short): one loop of frames and audio, rendered offline on the same clock
+window.__capture = {
+  duration: LOOP,
+  thumb: SONG.find(s => s.id === 'drop').start * BAR + 10 * BAR + 6 * STEP,   // above Saturn, two bars into part 2, between kicks
+  frame: tau => draw(tau),
+  async audio(sr = 48000) {
+    const live = ac;
+    ac = new OfflineAudioContext(2, Math.round(LOOP * sr), sr);
+    buildGraph(); master.gain.value = 0.9;
+    for (let s = 0; s < TOTAL_STEPS; s++) playStep(s, s * STEP);
+    const buf = await ac.startRendering();
+    ac = live;
+    return { sampleRate: sr, L: buf.getChannelData(0), R: buf.getChannelData(1) };
+  },
+};
+frame();
+})();
+</script>
+</body>
+</html>
