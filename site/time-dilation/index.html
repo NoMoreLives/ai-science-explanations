@@ -6,7 +6,6 @@
 <title>Time Dilation: Ambient Chip Mix</title>
 <link rel="icon" type="image/svg+xml" href="icon.svg">
 <link rel="stylesheet" href="../engine/engine.css">
-<style>html,body{background:#020108;color:#6f74a6}</style>
 </head>
 <body>
 <canvas id="c" width="180" height="320"></canvas>
@@ -18,6 +17,7 @@
 
 // ---------- config ----------
 const { W, H } = Engine;
+const { clamp } = Engine.math;
 const { num, CALM, SHORT } = Engine.params;
 const BPM = num('bpm', 90, 60, 100);
 const F0 = num('f0', 440, 220, 880);          // the probe's note in its own frame: the key of the track
@@ -43,7 +43,6 @@ const noteOf = f => { const m = Math.round(69 + 12 * Math.log2(f / 440)); return
 const letterOf = f => noteOf(f).replace(/-?\d+$/, '');
 const KEY = letterOf(F0);
 
-
 // the track: one section per stage, each introducing one layer
 const SONG = [
   { id: 'title', bars: 2 },
@@ -57,7 +56,6 @@ const SONG = [
 ];
 const songClock = Engine.clock(BPM, SONG);   // not "clock": that draws the clock faces
 const { STEP, BAR, BEAT, BAR_SEC, TOTAL_STEPS, LOOP, at, lb } = songClock;
-const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const mod = s => ((s % TOTAL_STEPS) + TOTAL_STEPS) % TOTAL_STEPS;
 
 // ---------- the probe's clock rate over the song, k(beat) ----------
@@ -231,7 +229,7 @@ function hit(layer, s) {
   }
   return 0;
 }
-const { since, pulse, last } = Engine.envelopes(hit, songClock);
+const { since, pulse, last, sequencer } = Engine.envelopes(hit, songClock);
 
 // a bed note is kept only if it stays at least a fifth from the beacon for as long as it sounds,
 // so nothing in the chip bed can mask the teaching tone
@@ -271,7 +269,7 @@ function bedNotes(s) {
 
 // one colour per actor, kept all the way through
 const P = {
-  bg: '#04050f', grid: '#0e1330', edge: '#2a3166', dim: '#8a90c8', fg: '#eef0ff', shadow: '#000000', white: '#ffffff', black: '#000000',
+  ...Engine.NEUTRALS, black: '#000000',
   beacon: '#5ff0ff', beaconD: '#12505a', beaconL: '#c8fbff',   // the probe: its note, its clock, its label
   hole: '#ff9a3c', holeD: '#4a2208', holeL: '#ffd9a8',          // the glow round the hole
   pad: '#a98bff', padD: '#35295e',
@@ -290,28 +288,8 @@ const lightCol = k => specOf(LAM0 / k)[1];
 const lightName = k => specOf(LAM0 / k)[2];
 
 // ---------- canvas + gfx helpers ----------
-const { cx, textW, text, card, bay, fillCircle, ditherCircle, line, ditherFill } = Engine.gfx(P);
+const { cx, text, textW, card, bay, fillCircle, ditherCircle, ring, line, dot, ditherFill, banner, fact } = Engine.gfx(P);
 const { mulberry } = Engine.rand;
-
-// thin dithered ring, sampled by angle; only the arc between a0 and a1 (radians)
-function ring(x, y, r, col, th, d, a0 = 0, a1 = 2 * Math.PI) {
-  if (d <= 0 || r < 1) return;
-  cx.fillStyle = col;
-  const lvl = d * 16, n = Math.ceil(r * 7 * (a1 - a0) / 6.283) + 8;
-  for (let k = 0; k < n; k++) {
-    const a = a0 + k / n * (a1 - a0), c = Math.cos(a), s = Math.sin(a);
-    for (let j = 0; j < th; j++) {
-      const px = Math.round(x + c * (r + j)), py = Math.round(y + s * (r + j));
-      if (px >= 0 && px < W && py >= 0 && py < H && bay(px, py) < lvl) cx.fillRect(px, py, 1, 1);
-    }
-  }
-}
-
-function dot(px, py, col, d) {
-  px = Math.round(px); py = Math.round(py);
-  if (px < 0 || px >= W || py < 0 || py >= H) return;
-  if (bay(px, py) < d * 16) { cx.fillStyle = col; cx.fillRect(px, py, 1, 1); }
-}
 
 const rng = mulberry(1915);
 
@@ -331,15 +309,12 @@ function stars(t, lens = []) {
 }
 
 // ---------- text helpers ----------
-const { fmtNum, fmtBig } = Engine.fmt;
-const rough = v => { const e = Math.pow(10, Math.floor(Math.log10(v)) - 1); return fmtBig(Math.round(v / e) * e); }; // 2 significant figures
+const { fmtNum, fmtBig, rough } = Engine.fmt;
 const fmtHz = f => f >= 100 ? String(Math.round(f)) : f >= 10 ? f.toFixed(1) : f.toFixed(2);
 const fmtR = r => r < 1.01 ? r.toFixed(4) : r.toFixed(2);
 const fmtS = s => s >= 1 ? `${fmtNum(s)} S` : s >= 1e-3 ? `${fmtNum(s * 1e3)} MS` : `${fmtNum(s * 1e6)} MICROSEC`;
 const fracOf = k => (STOPS.find(st => Math.abs(st.k - k) < 1e-6) || { frac: k.toFixed(2) }).frac;
 const stopLine = st => `AT ${fmtR(st.r)} RS: ${fmtHz(st.f)} HZ (${letterOf(st.f)})`;
-const banner = (title, sub, col, subCol = P.fg) => card([{ t: title, s: 2, c: col }, { t: sub, c: subCol }], 4, 90, col);
-const fact = (lines, border) => card(lines.map(l => typeof l === 'string' ? { t: l } : l), 200, 90, border);
 const timeline = s => { const w = textW(s.toUpperCase(), 1); cx.fillStyle = P.bg; cx.fillRect(88 - Math.round(w / 2), 242, w + 4, 9); text(s, 90, 244, P.dim, 1, 'c'); };
 
 // ---------- audio (everything synthesised) ----------
@@ -569,7 +544,7 @@ function tickGlow(ts, k) {
 function shadow(x, y, R, e = 0) {
   ditherCircle(x, y, R, Math.round(R * 1.7), P.holeD, 0.45 + 0.2 * e);
   ditherCircle(x, y, R, R + 3, P.hole, 0.5 + 0.3 * e);
-  ring(x, y, R, P.holeL, 1, 0.9, 0.2, Math.PI - 0.2);
+  ring(x, y, R, P.holeL, 1, 0.9, 1, 0.2, Math.PI - 0.2);
   fillCircle(x, y, R - 1, P.black);
 }
 // the side view: the hole at the bottom, our station far above, the probe on its tether between.
@@ -647,7 +622,7 @@ function climbWaves(v, t) {
     if (n !== last) {
       last = n;
       const d = v.py - y;
-      ring(v.px, v.py, d, specOf(LAM0 * z)[1], 1, 0.85 * (1 - d / 160), -Math.PI * 0.75, -Math.PI * 0.25);
+      ring(v.px, v.py, d, specOf(LAM0 * z)[1], 1, 0.85 * (1 - d / 160), 1, -Math.PI * 0.75, -Math.PI * 0.25);
     }
   }
 }
@@ -671,25 +646,7 @@ function bigClocks(t, k) {
 // ---------- HUD: the live step sequencer + the meter ----------
 const ROWS = [['PAD', 'pad', P.pad, P.padD], ['BELL', 'bell', P.bell, P.bellD], ['DRM', 'perc', P.drm, P.drmD],
               ['ARP', 'arp', P.arp, P.arpD], ['BASS', 'bass', P.bass, P.bassD], ['PROBE', 'beacon', P.beacon, P.beaconD]];
-function hud(t) {
-  const s = Math.floor(t / STEP), b0 = s - (s % 16), cur = s % 16, y0 = 257;
-  cx.fillStyle = P.shadow; cx.fillRect(6, y0 - 1, 172, 60);
-  cx.fillStyle = P.bg; cx.fillRect(4, y0 - 3, 172, 60);
-  cx.fillStyle = P.edge;
-  cx.fillRect(4, y0 - 3, 172, 1); cx.fillRect(4, y0 + 56, 172, 1); cx.fillRect(4, y0 - 3, 1, 60); cx.fillRect(175, y0 - 3, 1, 60);
-  ROWS.forEach(([lab, layer, col, dark], r) => {
-    const y = y0 + 1 + r * 9;
-    let active = false;
-    for (let i = 0; i < 16 && !active; i++) if (hit(layer, b0 + i)) active = true;
-    text(lab, 8, y, active ? (pulse(layer, t, 8) > 0.4 ? P.fg : col) : P.edge);
-    for (let i = 0; i < 16; i++) {
-      const on = hit(layer, b0 + i), x = 30 + i * 9;
-      cx.fillStyle = on ? (i === cur ? P.white : col) : active ? P.grid : '#0a0818';
-      cx.fillRect(x, y, 8, 5);
-    }
-  });
-  cx.fillStyle = P.fg; cx.fillRect(30 + cur * 9, y0 + 55, 8, 1); // playhead
-}
+const hud = sequencer(ROWS, { x0: 30 });
 // the note we hear from the probe, on a log scale from F0 down to 4 octaves below
 function meter(t) {
   if (!beaconOn(t)) return;

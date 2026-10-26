@@ -6,7 +6,6 @@
 <title>Gravitational Waves: Cosmic Halftime Mix</title>
 <link rel="icon" type="image/svg+xml" href="icon.svg">
 <link rel="stylesheet" href="../engine/engine.css">
-<style>html,body{background:#020108;color:#6f74a6}</style>
 </head>
 <body>
 <canvas id="c" width="180" height="320"></canvas>
@@ -18,6 +17,7 @@
 
 // ---------- config ----------
 const { W, H } = Engine;
+const { clamp } = Engine.math;
 const { num, CALM, SHORT } = Engine.params;
 const BPM = num('bpm', 140, 120, 160);
 
@@ -186,13 +186,11 @@ function hit(layer, s) {
   }
   return 0;
 }
-const { since, pulse, last } = Engine.envelopes(hit, clock);
-
-const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const { since, pulse, last, sequencer } = Engine.envelopes(hit, clock);
 
 // one colour per actor, kept all the way through
 const P = {
-  bg: '#03030b', grid: '#0d1230', edge: '#283062', dim: '#8a90c8', fg: '#eef0ff', shadow: '#000000', white: '#ffffff', black: '#000000',
+  ...Engine.NEUTRALS, black: '#000000',
   a: '#3ae0ff', aD: '#0c4656', aL: '#c4f8ff',        // black hole A
   b: '#ff4ad2', bD: '#561446', bL: '#ffc4f0',        // black hole B
   pad: '#b07aff', padD: '#3c2466', padL: '#e2ccff',  // the pad: both holes' voices, and the hole they become
@@ -207,33 +205,13 @@ const CYC = [P.gw, P.pad, P.a, P.b, P.wob, P.drm];
 const SUNP = ['#ff8a2a', '#ffb030', P.gw, P.gwL];
 
 // ---------- canvas + gfx helpers ----------
-const { cx, text, card, bay, fillCircle, ditherCircle, dEllipse, line, ditherFill } = Engine.gfx(P);
+const { cx, text, card, bay, fillCircle, ditherCircle, dEllipse, ring, line, dot, ditherFill, banner, fact, timeline } = Engine.gfx(P);
 const { mulberry, hash } = Engine.rand;
-
-// thin dithered ring, sampled by angle; only the arc between a0 and a1 (radians)
-function ring(x, y, r, col, th, d, a0 = 0, a1 = 2 * Math.PI) {
-  if (d <= 0 || r < 1) return;
-  cx.fillStyle = col;
-  const lvl = d * 16, n = Math.ceil(r * 7 * (a1 - a0) / 6.283) + 8;
-  for (let k = 0; k < n; k++) {
-    const a = a0 + k / n * (a1 - a0), c = Math.cos(a), s = Math.sin(a);
-    for (let j = 0; j < th; j++) {
-      const px = Math.round(x + c * (r + j)), py = Math.round(y + s * (r + j));
-      if (px >= 0 && px < W && py >= 0 && py < H && bay(px, py) < lvl) cx.fillRect(px, py, 1, 1);
-    }
-  }
-}
 
 function arrow(x0, y0, x1, y1, col) {
   line(x0, y0, x1, y1, col);
   const a = Math.atan2(y1 - y0, x1 - x0);
   for (const s of [-1, 1]) line(x1, y1, x1 + 3 * Math.cos(a + s * 2.5), y1 + 3 * Math.sin(a + s * 2.5), col);
-}
-
-function dot(px, py, col, d) {
-  px = Math.round(px); py = Math.round(py);
-  if (px < 0 || px >= W || py < 0 || py >= H) return;
-  if (bay(px, py) < d * 16) { cx.fillStyle = col; cx.fillRect(px, py, 1, 1); }
 }
 
 const rng = mulberry(150914);
@@ -376,12 +354,8 @@ function trace(x0, x1, y, amp, u, col, dimCol) {
 }
 
 // ---------- text helpers ----------
-const { fmtNum, fmtBig } = Engine.fmt;
-const rough = v => { const e = Math.pow(10, Math.floor(Math.log10(v)) - 1); return fmtBig(Math.round(v / e) * e); }; // 2 significant figures
+const { fmtNum, fmtBig, rough } = Engine.fmt;
 const sci = v => { const e = Math.floor(Math.log10(v)); return `${fmtNum(v / 10 ** e)}X10^${e}`; };
-const banner = (title, sub, col, subCol = P.fg) => card([{ t: title, s: 2, c: col }, { t: sub, c: subCol }], 4, 90, col);
-const fact = (lines, border) => card(lines.map(l => typeof l === 'string' ? { t: l } : l), 200, 90, border);
-const timeline = s => text(s, 90, 244, P.dim, 1, 'c');
 const ringNote = `${RING_NOTE}${RING_OCT}`;
 const keyLine = RING_NOTE === 'B' ? "NEAR B: THE KEY OF THIS TRACK" : 'THE TRACK STAYS IN B MINOR';
 
@@ -502,14 +476,7 @@ function snare(t, vel) {
   if (vel >= 1) noise(t, 0.4, 0.09, 'highpass', 2500, fxSend);
 }
 
-// 808-style metal: six detuned squares, bandpassed; hats and crash are made of this
-const METAL = [205.3, 304.4, 369.6, 522.7, 540, 800];
-function metal(t, dur, vol, hp, p = 0, dest = percIn) {
-  const bp = F('bandpass', 10000, 0.9), g = G(1);
-  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-  chain(bp, F('highpass', hp), g, pan(p), dest);
-  for (const f of METAL) { const o = osc('square', f * 1.6, t); o.connect(bp); play(o, t, dur); }
-}
+const metal = (t, dur, vol, hp, p = 0, dest = percIn) => Engine.audio.metal(t, dur, vol, hp, p, dest);
 const hat = (t, vel, p) => metal(t, 0.02 + vel * 0.03, 0.08 + 0.2 * vel, 7500, p);
 const crash = t => { metal(t, 1.8, 0.33, 4000, -0.3); metal(t + 0.002, 1.6, 0.25, 5000, 0.3, fxSend); noise(t, 1.4, 0.16, 'highpass', 6000, percIn); };
 
@@ -615,25 +582,7 @@ function wobNow(t) {
 // ---------- HUD: the live step sequencer + the meter ----------
 const ROWS = [['PAD', 'syn', P.pad, P.padD], ['ARP', 'arp', P.arp, P.arpD], ['DRM', 'drm', P.drm, P.drmD],
               ['HAT', 'hats', P.hat, P.hatD], ['WOB', 'bass', P.wob, P.wobD], ['GW', 'chirp', P.gw, P.gwD]];
-function hud(t) {
-  const s = Math.floor(t / STEP), b0 = s - (s % 16), cur = s % 16, y0 = 257;
-  cx.fillStyle = P.shadow; cx.fillRect(6, y0 - 1, 172, 60);
-  cx.fillStyle = P.bg; cx.fillRect(4, y0 - 3, 172, 60);
-  cx.fillStyle = P.edge;
-  cx.fillRect(4, y0 - 3, 172, 1); cx.fillRect(4, y0 + 56, 172, 1); cx.fillRect(4, y0 - 3, 1, 60); cx.fillRect(175, y0 - 3, 1, 60);
-  ROWS.forEach(([lab, layer, col, dark], r) => {
-    const y = y0 + 1 + r * 9;
-    let active = false;
-    for (let i = 0; i < 16 && !active; i++) if (hit(layer, b0 + i)) active = true;
-    text(lab, 8, y, active ? (pulse(layer, t, 8) > 0.4 ? P.fg : col) : P.edge);
-    for (let i = 0; i < 16; i++) {
-      const on = hit(layer, b0 + i), x = 22 + i * 9;
-      cx.fillStyle = on ? (i === cur ? P.white : col) : active ? P.grid : '#0a0818';
-      cx.fillRect(x, y, 8, 5);
-    }
-  });
-  cx.fillStyle = P.fg; cx.fillRect(22 + cur * 9, y0 + 55, 8, 1); // playhead
-}
+const hud = sequencer(ROWS);
 // the chirp's frequency while it sounds, otherwise the wobble's rate
 const WOBN = { 1: '1/4', 2: '1/8', 4: '1/16', 6: '1/16T' };
 function meter(t) {
@@ -844,7 +793,7 @@ function dropTravel(plt, t, s, e8, col) {
     if (!hit('drm', s - k)) continue;
     const r = 6 + (t - (s - k) * STEP) * 70;
     if (r > 150) break;
-    ring(xh, y, r, CYC[((s - k) >> 3) % CYC.length], 1, 0.8 * (1 - r / 160), -0.8, 0.8);
+    ring(xh, y, r, CYC[((s - k) >> 3) % CYC.length], 1, 0.8 * (1 - r / 160), 1, -0.8, 0.8);
   }
   bigHole(xh, y, 6, 0, 0, pulse('kick', t, 8));
   earth(xe, y, 8, t);

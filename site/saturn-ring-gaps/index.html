@@ -6,7 +6,6 @@
 <title>Saturn's Ring Gaps: Octave Mix</title>
 <link rel="icon" type="image/svg+xml" href="icon.svg">
 <link rel="stylesheet" href="../engine/engine.css">
-<style>html,body{background:#03030c;color:#6f6c99}</style>
 </head>
 <body>
 <canvas id="c" width="180" height="320"></canvas>
@@ -18,6 +17,7 @@
 
 // ---------- config ----------
 const { W, H } = Engine;
+const { clamp } = Engine.math;
 const { num, CALM, SHORT } = Engine.params;
 const BPM = num('bpm', 140, 100, 180);
 const EPS0 = num('eps', 0.4, 0.1, 0.45);  // the probe starts orbiting 2 x (1 + EPS0) times per Mimas orbit
@@ -202,7 +202,7 @@ function hit(layer, s) {
 const { pulse } = Engine.envelopes(hit, clock);
 
 const P = {
-  bg: '#08081a', grid: '#151532', edge: '#36345f', dim: '#8f8cba', fg: '#f4efdc', shadow: '#000000', white: '#ffffff',
+  ...Engine.NEUTRALS,
   sat1: '#e8cc8e', sat2: '#b8935a', sat3: '#6c5232', satL: '#fff3cf', satD: '#2e2416',
   ringB: '#efe3c2', ringA: '#c9bb98', ringC: '#7a7060',
   mimas: '#ff6ad5', pan: '#5cf08a', daph: '#3de0d0', prom: '#ff6262', pand: '#b48cff', janus: '#ff9a3c',
@@ -212,7 +212,7 @@ const P = {
 const CYC = [P.mimas, P.pan, P.kick, P.pand, P.janus, P.probe];
 
 // ---------- canvas + gfx helpers ----------
-const { cx: screen, withContext, textW, text, card, bay, line, ditherFill } = Engine.gfx(P);
+const { cx: screen, withContext, text, textW, card, bay, fillCircle, ditherCircle, ring, line, dot, ditherFill } = Engine.gfx(P);
 let cx = screen;   // the local pixel helpers draw on cx: swapped to an offscreen sprite while one is drawn
 const { mulberry, hash } = Engine.rand;
 
@@ -225,49 +225,12 @@ function tag(s, x, y, col) {
 }
 
 const rng = mulberry(1655);  // Huygens saw the rings as a ring
-const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const vnoise = x => { const i = Math.floor(x), f = x - i, u = f * f * (3 - 2 * f); return hash(i) * (1 - u) + hash(i + 1) * u; };
 const fmt = n => Math.round(n).toLocaleString('en-US');
 const fmtTo = (n, step) => fmt(Math.round(n / step) * step);
 const hz = f => f >= 10 ? fmt(f) : f.toFixed(1);
 
 function pset(x, y, col) { cx.fillStyle = col; cx.fillRect(Math.round(x), Math.round(y), 1, 1); }
-function dot(x, y, col, d) { x = Math.round(x); y = Math.round(y); if (bay(x, y) < d * 16) { cx.fillStyle = col; cx.fillRect(x, y, 1, 1); } }
-
-function fillCircle(x, y, r, col) {
-  if (r < 0) return;
-  x = Math.round(x); y = Math.round(y);
-  cx.fillStyle = col;
-  for (let dy = -r; dy <= r; dy++) {
-    const dx = Math.floor(Math.sqrt((r + .5) * (r + .5) - dy * dy));
-    cx.fillRect(x - dx, y + dy, 2 * dx + 1, 1);
-  }
-}
-
-// ordered-dither ring/disc, d = 0..1 density
-function ditherCircle(x, y, r0, r1, col, d) {
-  if (d <= 0) return;
-  x = Math.round(x); y = Math.round(y); r1 = Math.round(r1);
-  cx.fillStyle = col;
-  const lvl = d * 16;
-  for (let py = y - r1; py <= y + r1; py++) {
-    for (let px = x - r1; px <= x + r1; px++) {
-      const dd = (px - x) ** 2 + (py - y) ** 2;
-      if (dd <= r1 * r1 && dd >= r0 * r0 && bay(px, py) < lvl) cx.fillRect(px, py, 1, 1);
-    }
-  }
-}
-
-// thin dithered circle sampled by angle; sy squashes it into an ellipse
-function ring(x, y, r, col, d, sy = 1) {
-  if (d <= 0 || r < 1) return;
-  cx.fillStyle = col;
-  const lvl = d * 16, n = Math.ceil(r * 7) + 8;
-  for (let k = 0; k < n; k++) {
-    const a = k / n * 2 * Math.PI, px = Math.round(x + Math.cos(a) * r), py = Math.round(y + Math.sin(a) * r * sy);
-    if (bay(px, py) < lvl) cx.fillRect(px, py, 1, 1);
-  }
-}
 
 function arrow(x0, y0, x1, y1, col) {
   line(x0, y0, x1, y1, col);
@@ -795,7 +758,7 @@ function resStage(X, Y, t, aM) {
   stars(t);
   drawRings(X, Y, RES_SC, 1, 0, 0.45);
   drawPlanet(X, Y, R_SAT / RES_SC, 1);
-  ring(X, Y, MOON.mimas.a / RES_SC, P.mimas, 0.3);
+  ring(X, Y, MOON.mimas.a / RES_SC, P.mimas, 1, 0.3);
   const mx = X + MOON.mimas.a / RES_SC * Math.cos(aM), my = Y - MOON.mimas.a / RES_SC * Math.sin(aM);
   return { mx, my };
 }
@@ -808,11 +771,11 @@ function drawMimas(m) {
 function sceneRes(lt, t, sec) {
   const X = 90, Y = 116, bar = barOf(lt), eps = epsAt(lt), rKm = radiusFor(eps), aM = mimasAng(lt), aP = aM + relAng(lt);
   const m = resStage(X, Y, t, aM), r21 = R21 / RES_SC, locked = lt >= SWEEP, n = kicksBy(lt);
-  ring(X, Y, r21, P.kick, 0.3);
+  ring(X, Y, r21, P.kick, 1, 0.3);
   // the probe's orbit: a circle while sliding, then stretched a little more by every kick once locked
   const e = Math.min(0.32, n * 0.038), a = rKm / RES_SC, peri = KICK_A + Math.PI;
   const rOf = th => a * (1 - e * e) / (1 + e * Math.cos(th - peri));
-  if (locked) for (const dl of [-6, -3, 3, 6]) ring(X, Y, r21 + dl, P.ringA, 0.35);
+  if (locked) for (const dl of [-6, -3, 3, 6]) ring(X, Y, r21 + dl, P.ringA, 1, 0.35);
   for (let k = 0; k < 160; k++) { const th = k / 160 * 2 * Math.PI, r = rOf(th); dot(X + r * Math.cos(th), Y - r * Math.sin(th), P.probe, 0.7); }
   if (locked && e > 0) {  // the stretched orbit crosses its neighbours: collisions
     for (const dl of [-6, -3, 3, 6]) {
@@ -902,7 +865,7 @@ function dropCassini(plt, t, s, e8) {
     const a = hash(k) * 6.283 + omega(R21) * TF_ORB * 0.25 * t, r = cd0 + (cd1 - cd0) * (0.5 + 0.5 * Math.sin(t * (2 + hash(k + 9) * 3) + k));
     if (hash(k * 3 + s) < 0.35 + 0.5 * ke) pset(X + r * Math.cos(a), Y - r * Math.sin(a), ke > 0.5 ? P.white : P.kick);
   }
-  ring(X, Y, MOON.mimas.a / RES_SC, P.mimas, 0.3);
+  ring(X, Y, MOON.mimas.a / RES_SC, P.mimas, 1, 0.3);
   const m = { mx: X + MOON.mimas.a / RES_SC * Math.cos(aM), my: Y - MOON.mimas.a / RES_SC * Math.sin(aM) };
   drawMimas(m);
   return { title: 'CASSINI DIVISION',
@@ -987,7 +950,7 @@ function dropAll(plt, t, s, e8) {
     const r = MOON[k].a / ALL_SC, a = j * 1.9 + omega(MOON[k].a) * tf * t;
     return { k, lab, col: P[k], x: X + r * Math.cos(a), y: Y - r * Math.sin(a) * TILT, back: Math.sin(a) > 0 };
   });
-  for (const k of ['mimas', 'janus']) ring(X, Y, MOON[k].a / ALL_SC, P[k], 0.2, TILT);
+  for (const k of ['mimas', 'janus']) ring(X, Y, MOON[k].a / ALL_SC, P[k], 1, 0.2, TILT);
   const rp = R_SAT / ALL_SC, hidden = m => m.back && ((m.x - X) / rp) ** 2 + ((m.y - Y) / (rp * 0.9)) ** 2 < 1;
   drawRings(X, Y, ALL_SC, TILT, -1);
   for (const m of ms) if (m.back) fillCircle(m.x, m.y, m.k === 'mimas' ? 2 : 1, m.col);

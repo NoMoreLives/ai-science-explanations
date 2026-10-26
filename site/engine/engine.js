@@ -40,8 +40,8 @@ function clock(bpm, song) {
   return { SONG: song, STEP, BAR, BEAT, BAR_SEC, TOTAL_STEPS, LOOP, at, secDur, lb };
 }
 
-// visual envelopes, read from the scene's hit(layer, step) table so pictures and sound stay in sync
-function envelopes(hit, { STEP }) {
+// visual envelopes and readouts, read from the scene's hit(layer, step) table so pictures and sound stay in sync
+function envelopes(hit, { STEP, BAR, BEAT }) {
   function since(layer, t, back = 64) {
     const s = Math.floor(t / STEP);
     for (let k = 0; k < back; k++) if (hit(layer, s - k)) return t - (s - k) * STEP;
@@ -54,7 +54,42 @@ function envelopes(hit, { STEP }) {
     for (let k = 0; k < back; k++) { const v = hit(layer, s - k); if (v) return [v, t - (s - k) * STEP]; }
     return [0, 99];
   }
-  return { since, pulse, last };
+
+  // big 3-2-1 over the last bar of a build section; on the silent last beat it calls ifSilent() and returns true
+  function countdown(lt, sec, ifSilent, x = 90, y = 90) {
+    const bar = Math.floor(lt / BAR), beat = Math.floor((lt % BAR) / BEAT);
+    if (bar !== sec.bars - 1) return false;
+    if (beat === 3) { ifSilent(); return true; }
+    const n = String(3 - beat);
+    text(n, x + 2, y + 2, P.shadow, 6, 'c'); text(n, x, y, P.white, 6, 'c');
+    return false;
+  }
+
+  // the live step sequencer panel at the bottom: hud = sequencer(rows), then hud(t) each frame.
+  // rows = [[label, layer, colour, dark], ...]; x0 = where the 16 cells start;
+  // held(layer, barStep) keeps a row lit while a note holds, its empty cells filled in the row's dark colour
+  function sequencer(rows, { x0 = 22, held = () => false } = {}) {
+    return t => {
+      const s = Math.floor(t / STEP), b0 = s - (s % 16), cur = s % 16, y0 = 257;
+      cx.fillStyle = P.shadow; cx.fillRect(6, y0 - 1, 172, 60);
+      cx.fillStyle = P.bg; cx.fillRect(4, y0 - 3, 172, 60);
+      cx.fillStyle = P.edge;
+      cx.fillRect(4, y0 - 3, 172, 1); cx.fillRect(4, y0 + 56, 172, 1); cx.fillRect(4, y0 - 3, 1, 60); cx.fillRect(175, y0 - 3, 1, 60);
+      rows.forEach(([lab, layer, col, dark], r) => {
+        const y = y0 + 1 + r * 9, hold = held(layer, b0);
+        let active = hold;
+        for (let i = 0; i < 16 && !active; i++) if (hit(layer, b0 + i)) active = true;
+        text(lab, 8, y, active ? (pulse(layer, t, 8) > 0.4 || hold ? P.fg : col) : P.edge);
+        for (let i = 0; i < 16; i++) {
+          const on = hit(layer, b0 + i), x = x0 + i * 9;
+          cx.fillStyle = on ? (i === cur ? P.white : col) : hold ? dark : active ? P.grid : '#0a0818';
+          cx.fillRect(x, y, 8, 5);
+        }
+      });
+      cx.fillStyle = P.fg; cx.fillRect(x0 + cur * 9, y0 + 55, 8, 1); // playhead
+    };
+  }
+  return { since, pulse, last, countdown, sequencer };
 }
 
 // ---------- canvas + gfx helpers ----------
@@ -129,6 +164,7 @@ const bay = (x, y) => BAYER[(y & 3) * 4 + (x & 3)];
 
 function fillCircle(x, y, r, col) {
   if (r < 0) return;
+  x = Math.round(x); y = Math.round(y);
   cx.fillStyle = col;
   for (let dy = -r; dy <= r; dy++) {
     const dx = Math.floor(Math.sqrt((r + .5) * (r + .5) - dy * dy));
@@ -164,13 +200,13 @@ function dEllipse(x, y, a, b, rot, col, d, r0 = 0) {
   }
 }
 
-// thin dithered ring, sampled by angle; sy squashes it into an ellipse
-function ring(x, y, r, col, th, d, sy = 1) {
+// thin dithered ring, sampled by angle; sy squashes it into an ellipse, a0..a1 draws only that arc
+function ring(x, y, r, col, th, d, sy = 1, a0 = 0, a1 = 2 * Math.PI) {
   if (d <= 0 || r < 1) return;
   cx.fillStyle = col;
-  const lvl = d * 16, n = Math.ceil(r * 7) + 8;
+  const lvl = d * 16, n = Math.ceil(r * 7 * (a1 - a0) / (2 * Math.PI)) + 8;
   for (let k = 0; k < n; k++) {
-    const a = k / n * 2 * Math.PI, c = Math.cos(a), s = Math.sin(a);
+    const a = a0 + k / n * (a1 - a0), c = Math.cos(a), s = Math.sin(a);
     for (let j = 0; j < th; j++) {
       const px = Math.round(x + c * (r + j)), py = Math.round(y + s * (r + j) * sy);
       if (px >= 0 && px < W && py >= 0 && py < H && bay(px, py) < lvl) cx.fillRect(px, py, 1, 1);
@@ -207,12 +243,42 @@ function ditherFill(col, d) {
   cx.fillStyle = PAT[key]; cx.fillRect(0, 0, W, H);
 }
 
+// a star: dithered corona, limb, body, hot spot and boiling granulation; pal = [corona, limb, body, hot spot]
+function sun(x, y, r, pal, t, glow = 0.35) {
+  r = Math.max(1, Math.round(r));
+  ditherCircle(x, y, r, Math.round(r * 1.3) + 4, pal[0], glow);
+  fillCircle(x, y, r, pal[1]);
+  if (r < 3) return;
+  fillCircle(x, y, r - 2, pal[2]);
+  fillCircle(x - Math.round(r * 0.22), y - Math.round(r * 0.22), Math.round(r * 0.5), pal[3]);
+  if (r < 6) return;
+  cx.fillStyle = pal[1];
+  const rr = (r - 2) * (r - 2), sc = 6 / r + 0.25;
+  for (let py = -r + 2; py <= r - 2; py++) {
+    for (let px = -r + 2; px <= r - 2; px++) {
+      if (px * px + py * py > rr) continue;
+      const v = Math.sin(px * sc * 1.7 + t * 1.9) * Math.sin(py * sc * 2.1 - t * 1.3) + Math.sin((px - py) * sc + t * 0.7) * 0.6;
+      if (v > 0.95 && bay(x + px, y + py) < 8) cx.fillRect(x + px, y + py, 1, 1);
+    }
+  }
+}
+
+// the three caption slots every scene uses: section banner on top, fact card mid-screen, timeline note above the HUD
+const banner = (title, sub, col, subCol = P.fg) => card([{ t: title, s: 2, c: col }, { t: sub, c: subCol }], 4, 90, col);
+const fact = (lines, border) => card(lines.map(l => typeof l === 'string' ? { t: l } : l), 200, 90, border);
+const timeline = s => text(s, 90, 244, P.dim, 1, 'c');
+
 // the drawing kit, in the scene's palette (needs bg, fg, shadow; NEUTRALS has them)
 function gfx(palette) {
   P = palette;
   cv.style.background = P.bg;
-  return { cv, cx: screen, withContext, text, textW, card, BAYER, bay, fillCircle, ditherCircle, dEllipse, ring, line, dot, ditherFill };
+  return { cv, cx: screen, withContext, text, textW, card, BAYER, bay, fillCircle, ditherCircle, dEllipse, ring, line, dot, ditherFill,
+           sun, banner, fact, timeline };
 }
+
+// ---------- small maths ----------
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const smooth = x => { x = clamp(x, 0, 1); return x * x * (3 - 2 * x); };   // smoothstep on 0..1
 
 // ---------- seeded randomness ----------
 function mulberry(a) { return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
@@ -227,6 +293,7 @@ function fmtBig(v) {
   if (v >= 1e3) return Math.round(v).toLocaleString('en-US');
   return fmtNum(v);
 }
+const rough = v => { if (v <= 0) return '0'; const e = Math.pow(10, Math.floor(Math.log10(v)) - 1); return fmtBig(Math.round(v / e) * e); }; // 2 significant figures
 
 // ---------- audio (everything synthesised) ----------
 // ac is the live AudioContext, or an OfflineAudioContext while a render runs; scenes reach it through ctx()
@@ -292,7 +359,32 @@ function noise(t, dur, vol, type, f, dest, Q = 0.8) {
   return b;
 }
 
-const audio = { ctx, midi, track, G, F, chain, pan, pulseWave, warm, osc, env, play, noise, noiseSource };
+// ---------- shared instruments: each takes the bus it plays into ----------
+// 808-style metal: six detuned squares, bandpassed; hats and crashes are made of this
+const METAL = [205.3, 304.4, 369.6, 522.7, 540, 800];
+function metal(t, dur, vol, hp, p, dest) {
+  const bp = F('bandpass', 10000, 0.9), g = G(1);
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  chain(bp, F('highpass', hp), g, pan(p), dest);
+  for (const f of METAL) { const o = osc('square', f * 1.6, t); o.connect(bp); play(o, t, dur); }
+}
+// noise swept up through a bandpass, swelling into a downbeat
+function riser(t, dur, vol, dest) {
+  const s = noiseSource(true);
+  const bp = F('bandpass', 400, 3), g = G(1);
+  bp.frequency.setValueAtTime(400, t); bp.frequency.exponentialRampToValueAtTime(11000, t + dur);
+  g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(vol, t + dur - 0.01); g.gain.linearRampToValueAtTime(0.0001, t + dur);
+  chain(s, bp, g, dest); s.start(t); s.stop(t + dur + 0.02);
+}
+// sub boom on the big downbeats
+function impact(t, dest) {
+  const o = osc('sine', 120, t), g = G(1);
+  o.frequency.exponentialRampToValueAtTime(30, t + 1.2);
+  env(g, t, 0.8, 0.003, 1.4, 0.15);
+  chain(o, g, dest); play(o, t, 1.4);
+}
+
+const audio = { ctx, midi, track, G, F, chain, pan, pulseWave, warm, osc, env, play, noise, noiseSource, metal, riser, impact };
 
 // ---------- transport: scheduler, play/pause, mute, main loop, render hooks ----------
 // scene = {
@@ -423,6 +515,7 @@ function run(scene) {
 return {
   W, H, NEUTRALS, params, clock, envelopes, gfx, audio, run,
   rand: { mulberry, hash },
-  fmt: { fmtNum, fmtBig },
+  fmt: { fmtNum, fmtBig, rough },
+  math: { clamp, smooth },
 };
 })();

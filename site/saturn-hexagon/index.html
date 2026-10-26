@@ -6,7 +6,6 @@
 <title>Saturn's Hexagon: Liquid Jungle Mix</title>
 <link rel="icon" type="image/svg+xml" href="icon.svg">
 <link rel="stylesheet" href="../engine/engine.css">
-<style>html,body{background:#04050d;color:#6a72a0}</style>
 </head>
 <body>
 <canvas id="c" width="180" height="320"></canvas>
@@ -18,6 +17,7 @@
 
 // ---------- config ----------
 const { W, H } = Engine;
+const { clamp, smooth } = Engine.math;
 const { num, CALM, SHORT } = Engine.params;
 const BPM = num('bpm', 172, 150, 190);
 
@@ -132,10 +132,10 @@ function hit(layer, s) {
   }
   return 0;
 }
-const { pulse, last } = Engine.envelopes(hit, clock);
+const { pulse, last, sequencer } = Engine.envelopes(hit, clock);
 
 const P = {
-  bg: '#04050d', grid: '#10162e', edge: '#2c3760', dim: '#8088b8', fg: '#f0f2ff', shadow: '#000000', white: '#ffffff',
+  ...Engine.NEUTRALS,
   pad: '#b9a6ff', padD: '#3b3070', brk: '#ffb03a', brkD: '#6a4510', sub: '#5cf0a0', subD: '#1a5a3c',
   rde: '#ff6ad5', rdeD: '#5e1f52', bel: '#4cd8ff', belD: '#174f6e', fx: '#ff7a4a', fxD: '#6a2a14',
   gold: '#e8c070', aurG: '#9dffcf', earth: '#2f6bd8', land: '#3fae5a',
@@ -143,37 +143,9 @@ const P = {
 const CYC = [P.pad, P.brk, P.sub, P.rde, P.bel, P.fx];
 
 // ---------- canvas + gfx helpers ----------
-const { cx, textW, text, card, BAYER, bay, fillCircle, line, dot, ditherFill } = Engine.gfx(P);
+const { cx, text, textW, card, BAYER, bay, fillCircle, ditherCircle, ring, line, dot, ditherFill, banner, fact } = Engine.gfx(P);
 const { mulberry, hash } = Engine.rand;
-
-// ordered-dither ring/disc, d = 0..1 density
-function ditherCircle(x, y, r0, r1, col, d) {
-  if (d <= 0) return;
-  x = Math.round(x); y = Math.round(y); r1 = Math.round(r1);
-  cx.fillStyle = col;
-  const lvl = d * 16;
-  for (let py = y - r1; py <= y + r1; py++) {
-    if (py < 0 || py >= H) continue;
-    for (let px = x - r1; px <= x + r1; px++) {
-      const dd = (px - x) ** 2 + (py - y) ** 2;
-      if (dd <= r1 * r1 && dd >= r0 * r0 && bay(px, py) < lvl) cx.fillRect(px, py, 1, 1);
-    }
-  }
-}
-
-// thin dithered ring, sampled by angle; sy squashes it into an ellipse
-function ring(x, y, r, col, th, d, sy = 1) {
-  if (d <= 0 || r < 1) return;
-  cx.fillStyle = col;
-  const lvl = d * 16, n = Math.ceil(r * 7) + 8;
-  for (let k = 0; k < n; k++) {
-    const a = k / n * 2 * Math.PI, c = Math.cos(a), s = Math.sin(a);
-    for (let j = 0; j < th; j++) {
-      const px = Math.round(x + c * (r + j)), py = Math.round(y + s * (r + j) * sy);
-      if (bay(px, py) < lvl) cx.fillRect(px, py, 1, 1);
-    }
-  }
-}
+const { fmtNum } = Engine.fmt;
 
 function arrow(x0, y0, x1, y1, col) {
   line(x0, y0, x1, y1, col);
@@ -182,10 +154,7 @@ function arrow(x0, y0, x1, y1, col) {
 }
 
 const rng = mulberry(1986);
-const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const angDiff = (a, b) => Math.atan2(Math.sin(a - b), Math.cos(a - b));
-
-const smooth = x => { x = clamp(x, 0, 1); return x * x * (3 - 2 * x); };
 
 const STARS = Array.from({ length: 140 }, () => ({ x: rng() * W | 0, y: rng() * H | 0, b: rng() }));
 function stars(t) {
@@ -383,10 +352,7 @@ function earth(x, y, r, t) {
 }
 
 // ---------- text helpers ----------
-function fmtNum(v) { return v >= 10 ? String(Math.round(v)) : String(Math.round(v * 10) / 10); }
 const fmtBig = v => v >= 1e4 ? Math.round(v).toLocaleString('en-US') : fmtNum(v);
-const banner = (title, sub, col, subCol = P.fg) => card([{ t: title, s: 2, c: col }, { t: sub, c: subCol }], 4, 90, col);
-const fact = (lines, border) => card(lines.map(l => typeof l === 'string' ? { t: l } : l), 200, 90, border);
 const timeline = s => { const w = textW(s, 1) + 6; cx.fillStyle = P.bg; cx.fillRect(90 - (w >> 1), 242, w, 9); text(s, 90, 244, P.dim, 1, 'c'); };
 // text with a 1px black outline, for labels sitting on the planet
 function label(s, x, y, col, align = 'l') {
@@ -476,14 +442,7 @@ function snare(t, vel) {
   if (vel > 0.5) noise(t, 0.25, 0.12 * vel, 'bandpass', 2500, revSend, 0.6);
 }
 
-// 808-style metal: six detuned squares, bandpassed; ride, hats and the crash are all made of this
-const METAL = [205.3, 304.4, 369.6, 522.7, 540, 800];
-function metal(t, dur, vol, hp, p = 0, dest = percIn) {
-  const bp = F('bandpass', 10000, 0.9), g = G(1);
-  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-  chain(bp, F('highpass', hp), g, pan(p), dest);
-  for (const f of METAL) { const o = osc('square', f * 1.6, t); o.connect(bp); play(o, t, dur); }
-}
+const metal = (t, dur, vol, hp, p = 0, dest = percIn) => Engine.audio.metal(t, dur, vol, hp, p, dest);
 const ride = (t, vel, p) => metal(t, 0.4, 0.05 + 0.08 * vel, 5000, p);
 const hat = (t, vel, p) => metal(t, 0.03, 0.05 + 0.1 * vel, 8000, p);
 const crash = t => { metal(t, 1.6, 0.3, 4000, -0.3); metal(t + 0.002, 1.4, 0.22, 5000, 0.3, revSend); noise(t, 1.2, 0.16, 'highpass', 6000, percIn); };
@@ -536,13 +495,7 @@ function impact(t) {
   env(g, t, 0.8, 0.003, 1.4, 0.15);
   chain(o, g, brkIn); play(o, t, 1.4);
 }
-function riser(t, dur, vol) {
-  const s = noiseSource(true);
-  const bp = F('bandpass', 400, 3), g = G(1);
-  bp.frequency.setValueAtTime(400, t); bp.frequency.exponentialRampToValueAtTime(11000, t + dur);
-  g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(vol, t + dur - 0.01); g.gain.linearRampToValueAtTime(0.0001, t + dur);
-  chain(s, bp, g, percIn); s.start(t); s.stop(t + dur + 0.02);
-}
+const riser = (t, dur, vol) => Engine.audio.riser(t, dur, vol, percIn);
 // scene change: two falling triangle chimes
 function chime(t) {
   for (const [f, d] of [[2093, 0], [1568, 0.07]]) {
@@ -584,25 +537,7 @@ window.__phys = () => ({ R_KM, WIDTH_KM, earthsAcross: WIDTH_KM / KM_EARTH, PERI
 // ---------- HUD: the live step sequencer ----------
 const ROWS = [['PAD', 'pad', P.pad, P.padD], ['BRK', 'brk', P.brk, P.brkD], ['SUB', 'subs', P.sub, P.subD],
               ['RDE', 'rides', P.rde, P.rdeD], ['BEL', 'bell', P.bel, P.belD], ['FX', 'fx', P.fx, P.fxD]];
-function hud(t) {
-  const s = Math.floor(t / STEP), b0 = s - (s % 16), cur = s % 16, y0 = 257;
-  cx.fillStyle = P.shadow; cx.fillRect(6, y0 - 1, 172, 60);
-  cx.fillStyle = P.bg; cx.fillRect(4, y0 - 3, 172, 60);
-  cx.fillStyle = P.edge;
-  cx.fillRect(4, y0 - 3, 172, 1); cx.fillRect(4, y0 + 56, 172, 1); cx.fillRect(4, y0 - 3, 1, 60); cx.fillRect(175, y0 - 3, 1, 60);
-  ROWS.forEach(([lab, layer, col, dark], r) => {
-    const y = y0 + 1 + r * 9;
-    let active = false;
-    for (let i = 0; i < 16 && !active; i++) if (hit(layer, b0 + i)) active = true;
-    text(lab, 8, y, active ? (pulse(layer, t, 8) > 0.4 ? P.fg : col) : P.edge);
-    for (let i = 0; i < 16; i++) {
-      const on = hit(layer, b0 + i), x = 22 + i * 9;
-      cx.fillStyle = on ? (i === cur ? P.white : col) : active ? P.grid : '#0a1024';
-      cx.fillRect(x, y, 8, 5);
-    }
-  });
-  cx.fillStyle = P.fg; cx.fillRect(22 + cur * 9, y0 + 55, 8, 1); // playhead
-}
+const hud = sequencer(ROWS);
 
 // the last bar of a build: 3, 2, 1 on the first three beats, -1 = silent beat, 0 = not the last bar
 function countdownN(lt, sec) {

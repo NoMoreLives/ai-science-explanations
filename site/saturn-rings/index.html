@@ -6,7 +6,6 @@
 <title>Saturn's Rings: Game Boy Mix</title>
 <link rel="icon" type="image/svg+xml" href="icon.svg">
 <link rel="stylesheet" href="../engine/engine.css">
-<style>html,body{background:#04050d;color:#6a72a0}</style>
 </head>
 <body>
 <canvas id="c" width="180" height="320"></canvas>
@@ -18,6 +17,7 @@
 
 // ---------- config ----------
 const { W, H } = Engine;
+const { clamp, smooth } = Engine.math;
 const { num, CALM, SHORT } = Engine.params;
 const BPM = num('bpm', 150, 100, 190);
 
@@ -140,10 +140,10 @@ function hit(layer, s) {
   }
   return 0;
 }
-const { pulse, last } = Engine.envelopes(hit, clock);
+const { pulse, last, sequencer } = Engine.envelopes(hit, clock);
 
 const P = {
-  bg: '#04050d', grid: '#10162e', edge: '#2c3760', dim: '#8088b8', fg: '#f0f2ff', shadow: '#000000', white: '#ffffff',
+  ...Engine.NEUTRALS,
   bass: '#5cf0a0', bassD: '#1a5a3c', drm: '#ffb03a', drmD: '#6a4510', arp: '#4cd8ff', arpD: '#174f6e',
   led: '#ff6ad5', ledD: '#5e1f52', ctr: '#b9a6ff', ctrD: '#3b3070', fx: '#ff7a4a', fxD: '#6a2a14',
   gold: '#e8c070',
@@ -153,37 +153,9 @@ const RINGC = ['#2c2418', '#5a4c36', '#94806a', '#d2c4a0', '#f4ecd8'];
 const SATC = ['#21180f', '#5e4629', '#a8864f', '#dcc187', '#fbeec4'];
 
 // ---------- canvas + gfx helpers ----------
-const { cx, textW, text, card, BAYER, bay, fillCircle, line, dot, ditherFill } = Engine.gfx(P);
+const { cx, text, textW, card, BAYER, bay, fillCircle, ditherCircle, ring, line, dot, ditherFill, banner, fact } = Engine.gfx(P);
 const { mulberry, hash } = Engine.rand;
-
-// ordered-dither ring/disc, d = 0..1 density
-function ditherCircle(x, y, r0, r1, col, d) {
-  if (d <= 0) return;
-  x = Math.round(x); y = Math.round(y); r1 = Math.round(r1);
-  cx.fillStyle = col;
-  const lvl = d * 16;
-  for (let py = y - r1; py <= y + r1; py++) {
-    if (py < 0 || py >= H) continue;
-    for (let px = x - r1; px <= x + r1; px++) {
-      const dd = (px - x) ** 2 + (py - y) ** 2;
-      if (dd <= r1 * r1 && dd >= r0 * r0 && bay(px, py) < lvl) cx.fillRect(px, py, 1, 1);
-    }
-  }
-}
-
-// thin dithered ring, sampled by angle; sy squashes it into an ellipse
-function ring(x, y, r, col, th, d, sy = 1) {
-  if (d <= 0 || r < 1) return;
-  cx.fillStyle = col;
-  const lvl = d * 16, n = Math.ceil(r * 7) + 8;
-  for (let k = 0; k < n; k++) {
-    const a = k / n * 2 * Math.PI, c = Math.cos(a), s = Math.sin(a);
-    for (let j = 0; j < th; j++) {
-      const px = Math.round(x + c * (r + j)), py = Math.round(y + s * (r + j) * sy);
-      if (bay(px, py) < lvl) cx.fillRect(px, py, 1, 1);
-    }
-  }
-}
+const { fmtNum } = Engine.fmt;
 
 function arrow(x0, y0, x1, y1, col) {
   line(x0, y0, x1, y1, col);
@@ -192,9 +164,7 @@ function arrow(x0, y0, x1, y1, col) {
 }
 
 const rng = mulberry(1986);
-const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const angDiff = (a, b) => Math.atan2(Math.sin(a - b), Math.cos(a - b));
-const smooth = x => { x = clamp(x, 0, 1); return x * x * (3 - 2 * x); };
 
 const STARS = Array.from({ length: 140 }, () => ({ x: rng() * W | 0, y: rng() * H | 0, b: rng() }));
 function stars(t) {
@@ -332,10 +302,7 @@ function ringLabel(S, a, ang, txt, col, dx = 14, dy = -10) {
 }
 
 // ---------- text helpers ----------
-function fmtNum(v) { return v >= 10 ? String(Math.round(v)) : String(Math.round(v * 10) / 10); }
 const fmtBig = v => v >= 1e4 ? Math.round(v).toLocaleString('en-US') : fmtNum(v);
-const banner = (title, sub, col, subCol = P.fg) => card([{ t: title, s: 2, c: col }, { t: sub, c: subCol }], 4, 90, col);
-const fact = (lines, border) => card(lines.map(l => typeof l === 'string' ? { t: l } : l), 200, 90, border);
 const timeline = s => { const w = textW(s, 1) + 6; cx.fillStyle = P.bg; cx.fillRect(90 - (w >> 1), 242, w, 9); text(s, 90, 244, P.dim, 1, 'c'); };
 function label(s, x, y, col, align = 'l') {
   for (const [dx, dy] of [[-1, 0], [1, 0], [0, -1], [0, 1], [1, 1]]) text(s, x + dx, y + dy, P.shadow, 1, align);
@@ -525,25 +492,7 @@ window.__phys = () => ({ R_RES, LAPS, mimasH: periodH(MIMAS_A), panH: periodH(PA
 // ---------- HUD: the live step sequencer ----------
 const ROWS = [['BAS', 'bass', P.bass, P.bassD], ['DRM', 'drm', P.drm, P.drmD], ['ARP', 'arp', P.arp, P.arpD],
               ['LED', 'lead', P.led, P.ledD], ['CTR', 'ctrs', P.ctr, P.ctrD], ['FX', 'fx', P.fx, P.fxD]];
-function hud(t) {
-  const s = Math.floor(t / STEP), b0 = s - (s % 16), cur = s % 16, y0 = 257;
-  cx.fillStyle = P.shadow; cx.fillRect(6, y0 - 1, 172, 60);
-  cx.fillStyle = P.bg; cx.fillRect(4, y0 - 3, 172, 60);
-  cx.fillStyle = P.edge;
-  cx.fillRect(4, y0 - 3, 172, 1); cx.fillRect(4, y0 + 56, 172, 1); cx.fillRect(4, y0 - 3, 1, 60); cx.fillRect(175, y0 - 3, 1, 60);
-  ROWS.forEach(([lab, layer, col, dark], r) => {
-    const y = y0 + 1 + r * 9;
-    let active = false;
-    for (let i = 0; i < 16 && !active; i++) if (hit(layer, b0 + i)) active = true;
-    text(lab, 8, y, active ? (pulse(layer, t, 8) > 0.4 ? P.fg : col) : P.edge);
-    for (let i = 0; i < 16; i++) {
-      const on = hit(layer, b0 + i), x = 22 + i * 9;
-      cx.fillStyle = on ? (i === cur ? P.white : col) : active ? P.grid : '#0a1024';
-      cx.fillRect(x, y, 8, 5);
-    }
-  });
-  cx.fillStyle = P.fg; cx.fillRect(22 + cur * 9, y0 + 55, 8, 1); // playhead
-}
+const hud = sequencer(ROWS);
 
 // the last bar of a build: 3, 2, 1 on the first three beats, -1 = silent beat, 0 = not the last bar
 function countdownN(lt, sec) {
