@@ -14,7 +14,8 @@ Produces one self-contained `index.html` (no build step, no dependencies) that t
 1. **Pin down the physics first.** Write down the 2-4 numbers that define the phenomenon (e.g. f_left, f_right, beat = |f_r - f_l|) and the one-sentence truth the viewer should leave with. Put them in a `CONFIG` block and read optional overrides from `URLSearchParams`, so the demo is adjustable and the visuals and audio can never disagree.
 2. **Plan 4-6 beats** (about 30-40 s, looping), following the channel's staging: title card, real scene, schematic overlay (banner "SCHEMATIC: ... SLOWED" when time is dilated), a comparison or still-vs-moving contrast, back to the real scene or a summary, and an outro with a disclaimer for anything exaggerated.
 3. **Copy the example and swap the scenes.** Keep the engine sections (`gfx` helpers, audio scheduler, main loop); rewrite `SCENES`, `DUR`, and the audio generators.
-4. **Verify without ears** (see Verification), then tell the user plainly what you could and could not check.
+4. **Make the scene icon** (see Icon) so the demo has a pixel-art thumbnail and favicon instead of an emoji.
+5. **Verify without ears** (see Verification), then tell the user plainly what you could and could not check.
 
 ## Look (what makes it read as Bit Forge)
 
@@ -24,6 +25,28 @@ Produces one self-contained `index.html` (no build step, no dependencies) that t
 - Glows and fades use ordered (Bayer 4x4) dithering, not alpha: `ditherCircle()` for halos and a pattern-fill wipe between scenes.
 - Labels should follow the objects they describe and state values ("100 HZ"), not generic words.
 - Keep every text box inside 180px; check by measuring with `textW()` rather than guessing.
+
+## Icon (pixel art, never an emoji)
+
+Every scene gets its own icon, drawn in the same style as the scene. Do not use an emoji anywhere (index card, favicon, title).
+
+1. Design a 16x16 sprite (24x24 if the subject needs detail) that shows the phenomenon's single most recognisable object (ring, siren, comet, eye), not a generic science symbol. Use only colours from the scene's palette, plus one dark outline colour, at most 5-6 colours total. Leave a 1px transparent margin and keep the silhouette readable at 16px.
+2. Write it as a text grid, a palette block, a blank line, then rows (`.` = transparent):
+
+   ```
+   a=#0b0d1a
+   b=#ffd23f
+   c=#5b6cff
+
+   ......aaaa......
+   ....aabbbbaa....
+   ...
+   ```
+
+3. Convert it with `node <skill>/scripts/make-icon.mjs sprite.txt <scene-folder>/icon.svg`. The output is a crisp-edged SVG, so it scales with no blur. Keep `sprite.txt` out of `site/`.
+4. Add `<link rel="icon" type="image/svg+xml" href="icon.svg">` to the scene's `<head>`.
+5. If the project has a scene index (e.g. `site/index.html`), set that entry's `icon` to the SVG path (`"frb/icon.svg"`). The index renders `.svg` icons as `<img class="pixel">` with `image-rendering: pixelated`.
+6. Look at it: screenshot at 16px, 40px and 128px and check it still reads.
 
 ## Audio (all code-driven)
 
@@ -48,4 +71,4 @@ Real frequencies (100 Hz) are far faster than the eye can follow. Draw waves wit
 
 ## Hand-off
 
-Tell the user: the file path, how to run it (click once; headphones if stereo matters), the URL params, what was verified and what was not, and one suggested next step (more topics; JSON scene files and an FFmpeg MP4 export, as in `docs/bitforge-findings.md` if that file exists).
+Tell the user: the file path (and the `icon.svg`), how to run it (click once; headphones if stereo matters), the URL params, what was verified and what was not, and one suggested next step (more topics; JSON scene files and an FFmpeg MP4 export, as in `docs/bitforge-findings.md` if that file exists).

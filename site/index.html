@@ -54,6 +54,7 @@
     outline: none;
   }
   .card .icon { font-size: 40px; line-height: 1; margin-bottom: 12px; }
+  .card img.pixel { width: 48px; height: 48px; image-rendering: pixelated; display: block; margin-bottom: 12px; }
   .card h2 { margin: 0 0 8px; font-size: 18px; text-transform: uppercase; }
   .card p { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.4; }
   .card .go { margin-top: 16px; color: var(--accent); font-size: 14px; }
@@ -72,13 +73,15 @@
   const experiments = [
     // { path: "binaural/", icon: "🎧", title: "Binaural Beats", desc: "How two slightly different tones in each ear create a beat inside your head." }, // test, not requred
     // { path: "sun-lifecycle/", icon: "☀️", title: "Life of a Sun", desc: "From nebula to main sequence to red giant and beyond." }, //test, not required
-    { path: "sun-lifecycle-2/", icon: "🔊", title: "Life of a Sun: Hardcore Mix", desc: "A 150 BPM chiptune hardcore track: each layer is one phase of a star's life, then it all drops." },
-    { path: "black-hole/", icon: "🕳️", title: "Black Hole: Industrial Mix", desc: "A 160 BPM chip-industrial techno track: star, collapse, supernova, horizon, disk, then a 32-bar drop of jets, merger, Hawking glow and evaporation." },
-    { path: "comet/", icon: "☄️", title: "Ice Comet: Techno Mix", desc: "A 138 BPM chip techno track riding a Halley-like orbit: Oort cloud, fall, frost line, coma, tails, perihelion, then a 32-bar drop of meteors, melting and breakup." },
-    { path: "saturn-hexagon/", icon: "🪐", title: "Saturn's Hexagon: Liquid Jungle Mix", desc: "A 172 BPM chip jungle track: pad, amen break, sub, ride and bells each build one piece of the polar storm, then a 32-bar drop of the full hexagon, the rings and a dive into the eye." },
-    { path: "cats-eye/", icon: "👁️", title: "Cat's Eye Nebula: DnB Mix", desc: "A 174 BPM chip drum & bass track: a dying star sheds shells, then wind, X-ray bubble, jets and white-dwarf core each add a layer, until a square lead's filter opens into a 32-bar drop of glowing gas." },
-    { path: "gravitational-waves/", icon: "🌊", title: "Gravitational Waves: Cosmic Halftime Mix", desc: "A 140 BPM chip halftime track in B minor, the note the merged black hole rings at: pad, arp, drums, laser hats and wobble each build one piece of GW150914, then LIGO's real chirp, slowed then at real speed, drops into 32 bars of merger, energy, journey and detection." },
-    { path: "frb/", icon: "📡", title: "Fast Radio Burst: Goa Trance Mix", desc: "A 140 BPM chip goa track: kick, rolling bass, acid, hats and arp build a 1 ms burst with 80 years of the Sun's energy, its real-speed dispersion whistle, then a 32-bar space drop of warp, host galaxy, whole sky and repeaters." },
+    { path: "sun-lifecycle-2/", icon: "sun-lifecycle-2/icon.svg", title: "Life of a Sun: Hardcore Mix", desc: "A 150 BPM chiptune hardcore track: each layer is one phase of a star's life, then it all drops." },
+    { path: "black-hole/", icon: "black-hole/icon.svg", title: "Black Hole: Industrial Mix", desc: "A 160 BPM chip-industrial techno track: star, collapse, supernova, horizon, disk, then a 32-bar drop of jets, merger, Hawking glow and evaporation." },
+    { path: "comet/", icon: "comet/icon.svg", title: "Ice Comet: Techno Mix", desc: "A 138 BPM chip techno track riding a Halley-like orbit: Oort cloud, fall, frost line, coma, tails, perihelion, then a 32-bar drop of meteors, melting and breakup." },
+    { path: "saturn-hexagon/", icon: "saturn-hexagon/icon.svg", title: "Saturn's Hexagon: Liquid Jungle Mix", desc: "A 172 BPM chip jungle track: pad, amen break, sub, ride and bells each build one piece of the polar storm, then a 32-bar drop of the full hexagon, the rings and a dive into the eye." },
+    { path: "saturn-rings/", icon: "saturn-rings/icon.svg", title: "Saturn's Rings: Game Boy Mix", desc: "A 150 BPM Game Boy chiptune in A major: wave bass, noise drums, pulse arp, lead and counter each build one piece of the rings, from Kepler orbits to shepherd moons, the Mimas 2:1 resonance and clumping, then a 32-bar drop of the whole system, Pan and Daphnis, and the braided F ring." },
+    { path: "saturn-ring-gaps/", icon: "saturn-ring-gaps/icon.svg", title: "Saturn's Ring Gaps: Octave Mix", desc: "A 140 BPM Game Boy chiptune in D, the note Mimas's orbit makes sped up 12 million times: wave bass, noise drums, pulse arps, lead and two pure orbit tones each build one piece of the rings, until a probe slides into the 2:1 resonance and its beat dies into an octave, then a 32-bar drop of the Cassini Division, Pan's and Daphnis's wakes, a resonance map and the whole system." },
+    { path: "cats-eye/", icon: "cats-eye/icon.svg", title: "Cat's Eye Nebula: DnB Mix", desc: "A 174 BPM chip drum & bass track: a dying star sheds shells, then wind, X-ray bubble, jets and white-dwarf core each add a layer, until a square lead's filter opens into a 32-bar drop of glowing gas." },
+    { path: "gravitational-waves/", icon: "gravitational-waves/icon.svg", title: "Gravitational Waves: Cosmic Halftime Mix", desc: "A 140 BPM chip halftime track in B minor, the note the merged black hole rings at: pad, arp, drums, laser hats and wobble each build one piece of GW150914, then LIGO's real chirp, slowed then at real speed, drops into 32 bars of merger, energy, journey and detection." },
+    { path: "frb/", icon: "frb/icon.svg", title: "Fast Radio Burst: Goa Trance Mix", desc: "A 140 BPM chip goa track: kick, rolling bass, acid, hats and arp build a 1 ms burst with 80 years of the Sun's energy, its real-speed dispersion whistle, then a 32-bar space drop of warp, host galaxy, whole sky and repeaters." },
   ];
 
   const grid = document.getElementById("grid");
@@ -86,7 +89,17 @@
     const a = document.createElement("a");
     a.className = "card";
     a.href = e.path;
-    a.innerHTML = `<div class="icon">${e.icon}</div><h2></h2><p></p><div class="go">▶ PLAY</div>`;
+    a.innerHTML = `<div class="icon"></div><h2></h2><p></p><div class="go">▶ PLAY</div>`;
+    const icon = a.querySelector(".icon");
+    if (e.icon.endsWith(".svg")) {
+      const img = document.createElement("img");
+      img.className = "pixel";
+      img.alt = "";
+      img.src = e.icon;
+      icon.replaceWith(img);
+    } else {
+      icon.textContent = e.icon;
+    }
     a.querySelector("h2").textContent = e.title;
     a.querySelector("p").textContent = e.desc;
     grid.appendChild(a);
