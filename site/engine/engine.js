@@ -299,15 +299,16 @@ const audio = { ctx, midi, track, G, F, chain, pan, pulseWave, warm, osc, env, p
 function run(scene) {
   const { STEP, BAR, LOOP, TOTAL_STEPS, SONG, BAR_SEC } = scene.clock;
 
-  // a fresh audio graph on ac: master out, then the scene's buses into it
+  // a fresh audio graph on ac: master out, the scene's buses into it, then the noise
+  // (filled last, as every scene did before the engine, so seeded runs draw the same random numbers)
   function build() {
     waves = {};
-    noiseBuf = ac.createBuffer(1, ac.sampleRate, ac.sampleRate);
-    const d = noiseBuf.getChannelData(0);
-    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
     master = G(0.0001);
     master.connect(ac.destination);
     scene.buildGraph(ac, master);
+    noiseBuf = ac.createBuffer(1, ac.sampleRate, ac.sampleRate);
+    const d = noiseBuf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
   }
 
   function playStep(s, t) {
