@@ -88,7 +88,7 @@
   for (const e of experiments) {
     const a = document.createElement("a");
     a.className = "card";
-    a.href = e.path;
+    a.href = "view.html?scene=" + encodeURIComponent(e.path);
     a.innerHTML = `<div class="icon"></div><h2></h2><p></p><div class="go">▶ PLAY</div>`;
     const icon = a.querySelector(".icon");
     if (e.icon.endsWith(".svg")) {

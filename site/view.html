@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>8-Bit Science</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #020108; overflow: hidden; }
+  iframe { position: fixed; inset: 0; width: 100%; height: 100%; border: 0; }
+  a.back {
+    position: fixed; top: 8px; left: 8px; z-index: 10;
+    padding: 6px 10px;
+    background: #151932; color: #e8ecff;
+    border: 3px solid #5b6cff; box-shadow: 3px 3px 0 #000;
+    font: 12px "Courier New", monospace; text-transform: uppercase; text-decoration: none;
+    opacity: .6; transition: opacity .15s;
+  }
+  a.back:hover, a.back:focus-visible { opacity: 1; border-color: #ffd23f; outline: none; }
+</style>
+</head>
+<body>
+<a class="back" href="./">&larr; Back</a>
+<iframe id="scene" allow="autoplay" title="Scene"></iframe>
+<script>
+  // Wraps a scene (view.html?scene=black-hole/) so scenes need no back button of their own.
+  // Other query params (e.g. bpm=140) are forwarded to the scene.
+  const q = new URLSearchParams(location.search);
+  const scene = (q.get("scene") || "").replace(/^\/+/, "");
+  if (!/^[a-z0-9-]+\/?$/i.test(scene)) {
+    location.replace("./");
+  } else {
+    q.delete("scene");
+    const f = document.getElementById("scene");
+    f.addEventListener("load", () => {
+      f.focus(); // so keyboard shortcuts (space, m) work straight away
+      try { document.title = f.contentDocument.title; } catch (_) {}
+    });
+    f.src = scene + (q.toString() ? "?" + q : "");
+  }
+</script>
+</body>
+</html>
