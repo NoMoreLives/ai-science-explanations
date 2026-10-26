@@ -1,7 +1,7 @@
 ---
 tags: [pixel-science-explainer]
-max_turns: 30
-timeout_seconds: 900
+max_turns: 80
+timeout_seconds: 2400
 allowed_tools: [Read, Glob, Grep, Skill, Write, Edit, Bash]
 ---
 

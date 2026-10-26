@@ -6,15 +6,15 @@ description: Render one of this repo's pixel-art scenes (site/<scene>/index.html
 
 # Scene → YouTube Short
 
-Each scene is a single HTML file that draws a 180×320 canvas from one clock (`tau`, seconds) and synthesises its music in Web Audio on that same clock. Rather than screen-record it (dropped frames, audio drift, browser chrome), render it **offline and deterministically**: draw every frame at an exact `tau`, render the audio with an `OfflineAudioContext`, and let ffmpeg combine the two. For that, the scene exposes a small hook, `window.__capture`, and the bundled `scripts/render.mjs` does the rest.
+Each scene (`site/<name>/index.html`, on the shared engine in `site/engine/`) draws a 180×320 canvas from one clock (`tau`, seconds) and synthesises its music in Web Audio on that same clock. Rather than screen-record it (dropped frames, audio drift, browser chrome), render it **offline and deterministically**: draw every frame at an exact `tau`, render the audio with an `OfflineAudioContext`, and let ffmpeg combine the two. The scene exposes that as `window.__capture`, which `Engine.run()` sets up for every engine scene, and the bundled `scripts/render.mjs` does the rest.
 
 A Short also has a job the website version doesn't: it has to stop a thumb mid-scroll. The scenes open gently (a title card, a fade-in, near-silence) because on the site someone has already chosen to press play. So the video gets a **Shorts opening**, behind `?short=1`, which the renderer passes by default.
 
 ## Workflow
 
 1. **Find the scene.** When called as `/scene-to-short <name>`, the argument is the scene (any extra words are options, like a thumbnail time or `bpm=`). With no argument, list the folders in `site/` and ask which one. Scenes live in `site/<name>/index.html`. Match loose names ("the sun one" could be `sun-lifecycle` or `sun-lifecycle-2`; ask if it's really ambiguous).
-2. **Check what's already there:** `grep -n "__capture\|SHORT" site/<name>/index.html`. Skip whatever exists.
-3. **Add the capture hook** (below).
+2. **Check what's already there:** `grep -n "Engine.run\|__capture\|SHORT" site/<name>/index.html`. A scene that calls `Engine.run` already has the capture hook (its `thumb:` option sets the default thumbnail time), so skip step 3.
+3. **Add the capture hook** only if the scene isn't on the engine (below).
 4. **Add the Shorts opening** (below). The audio hit always goes in. The title is the user's call: ask them before rendering.
 5. **Check the opening before the full render.** It's cheap: `--thumb 0.5 --thumb-only` and `--thumb 2 --thumb-only` each write one frame in a few seconds. Look at them. Then render the thumbnail you actually want (see "Thumbnail").
 6. **Render** from the repo root:
@@ -26,7 +26,9 @@ A Short also has a job the website version doesn't: it has to stop a thumb mid-s
 7. **Look at the result.** Pull 3–4 frames, including the first second and the busiest section (`ffmpeg -ss <sec> -i out/<name>.mp4 -frames:v 1 -vf scale=360:640 /tmp/f.png`), and view them with the thumbnail. You're checking that the hook headline shows, captions are present, there's no "TAP TO START" or "PAUSED", and it's the right scene. The PASS lines can't see any of that.
 8. **Report** the MP4 and thumbnail paths, the duration, any WARN lines, which title the video opens on, and a short note on what changed in the scene.
 
-## The capture hook
+## The capture hook (scenes not on the engine)
+
+Every scene in `site/` currently runs on the engine, which provides this hook through `Engine.run({ draw, thumb, ... })`. The engine's `draw(tau)` contract is the same as below: pure in `tau`, no wall clock. The rest of this section is for a scene written without the engine.
 
 ```js
 window.__capture = {

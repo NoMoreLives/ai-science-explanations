@@ -1,0 +1,602 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Lich Pulsar: Chip 2-Step Garage Mix</title>
+<link rel="icon" type="image/svg+xml" href="icon.svg">
+<link rel="stylesheet" href="../engine/engine.css">
+</head>
+<body>
+<canvas id="c" width="180" height="320"></canvas>
+<p>click / space: play-pause &middot; m: mute &middot; ?bpm=134 &amp;pms=6.2185 (spin, ms) &amp;mass=1.4 (suns) &amp;rkm=12 &amp;calm=1 (no shake/flash)</p>
+<script src="../engine/engine.js"></script>
+<script>
+(() => {
+'use strict';
+
+// ---------- config ----------
+const { W, H } = Engine;
+const { num, CALM, SHORT } = Engine.params;
+const { clamp, smooth } = Engine.math;
+const BPM = num('bpm', 134, 124, 140);
+
+// PSR B1257+12, "Lich": a millisecond pulsar with three planets (Wolszczan & Frail 1992, Konacki & Wolszczan 2003).
+// Every number drawn on screen comes from these.
+const PSR = {
+  pms: num('pms', 6.2185, 1.5, 50),     // spin period, ms
+  mass: num('mass', 1.4, 1.1, 2.2),     // solar masses
+  rkm: num('rkm', 12, 9, 15),           // radius, km (not measured: a typical neutron star)
+  ly: 2300,                             // distance, light years
+};
+// orbital period (days), true mass (Earths), orbit tilt to our line of sight (deg; Draugr's is unmeasured, so typical)
+const PLANETS = [
+  { name: 'DRAUGR', layer: 'bell', days: 25.262, me: 0.020, inc: 50, px: 1, th0: 0.4 },
+  { name: 'POLTERGEIST', layer: 'keys', days: 66.542, me: 4.3, inc: 53, px: 3, th0: 2.2 },
+  { name: 'PHOBETOR', layer: 'lead', days: 98.211, me: 3.9, inc: 47, px: 3, th0: 4.1 },
+];
+const G_SI = 6.674e-11, M_SUN = 1.989e30, M_EARTH = 5.972e24, M_MOON = 7.342e22, AU = 1.496e11, C = 2.998e8, DAY = 86400;
+const M_KG = PSR.mass * M_SUN;
+const F_SPIN = 1000 / PSR.pms;                                  // turns a second
+const TURNS_DAY = F_SPIN * DAY;
+const V_EQ = 2 * Math.PI * PSR.rkm / (PSR.pms / 1000);          // equator speed, km/s
+for (const p of PLANETS) {
+  const T = p.days * DAY, m = p.me * M_EARTH, si = Math.sin(p.inc * Math.PI / 180);
+  p.a = Math.cbrt(G_SI * (M_KG + m) * T * T / (4 * Math.PI ** 2));   // Kepler's third law, m
+  p.au = p.a / AU;
+  p.aPsr = p.a * m / (M_KG + m);                                // the pulsar's own little orbit, m
+  p.xMs = p.aPsr * si / C * 1000;                               // so its pulses arrive this much early or late, ms
+  p.vTug = 2 * Math.PI * p.aPsr * si / T;                       // the pulsar's speed toward and away from us, m/s
+  p.moons = m / M_MOON;
+}
+const [DRAUGR, POLTER, PHOB] = PLANETS;
+const RATIO = PHOB.days / POLTER.days;                          // close to 3:2
+const X_MAX = PLANETS.reduce((s, p) => s + p.xMs, 0);           // the most a pulse can be early or late, ms
+const V_TUG = Math.max(...PLANETS.map(p => p.vTug));
+
+// the track: one section per part of the system, each introducing one layer
+const SONG = [
+  { id: 'title', bars: 2 },
+  { id: 'spin', bars: 8 },       // layer 1: 2-step drums = the lighthouse
+  { id: 'lich', bars: 8 },       // layer 2: speed-garage bass = the star that died and spun back up
+  { id: 'draugr', bars: 8 },     // layer 3: bells = world 1
+  { id: 'polter', bars: 8 },     // layer 4: keys = world 2
+  { id: 'phobetor', bars: 8 },   // layer 5: chip lead = world 3
+  { id: 'build', bars: 4 },      // snare roll, riser, countdown
+  { id: 'drop', bars: 32 },      // the system, the wobble, the 3:2, the first worlds
+  { id: 'outro', bars: 4 },      // keys and bells alone
+];
+const clock = Engine.clock(BPM, SONG);
+const { STEP, BAR, BEAT, BAR_SEC, LOOP, at, secDur, lb } = clock;
+const K = Object.fromEntries(SONG.map(s => [s.id, s.k]));
+const SWING = 0.22;   // 2-step shuffle: every second 16th is late by this many steps
+const DROP0 = SONG[K.drop].start;
+
+// schematic time: Phobetor goes round once every 8 bars; the drop's resonance part runs twice as fast
+const DPB = PHOB.days / 8;                                      // days per bar
+const FAST0 = (DROP0 + 16) * BAR, FAST1 = FAST0 + 8 * BAR;
+const daysAt = t => DPB * (t + clamp(t - FAST0, 0, FAST1 - FAST0)) / BAR;
+const thetaD = (p, d) => p.th0 + 2 * Math.PI * d / p.days;
+const theta = (p, t) => thetaD(p, daysAt(t));
+// a planet on our side of the star puts the pulsar on the far side: its pulses arrive late. ms, + = late
+const residualD = d => PLANETS.reduce((s, p) => s + p.xMs * Math.sin(thetaD(p, d)), 0);
+const residual = t => residualD(daysAt(t));
+
+// E minor: Em9 Cmaj7 Am11 Bm7, a bittersweet late-night loop
+const ROOT = [40, 36, 33, 35];
+const CHORD = [[55, 59, 62, 66], [55, 59, 60, 64], [55, 60, 62, 64], [54, 57, 59, 62]];
+const KICK = [[0, 10], [0, 3, 10]];                  // two-bar skippy 2-step kick: never four to the floor
+const BASSP = { 0: 0, 7: 12, 10: 0, 14: 7 };         // speed-garage line, semitones over the root
+const KEYS_AT = [2, 7, 13];
+const BELL_AT = { 0: 3, 5: 1, 10: 2, 12: 3, 15: 0 }; // step: which chord tone, two octaves up
+const LEAD = [   // one bar per chord, 0 = rest
+  71, 0, 0, 74, 0, 0, 78, 0, 0, 0, 76, 0, 74, 0, 71, 0,
+  76, 0, 0, 0, 0, 0, 79, 0, 78, 0, 76, 0, 0, 0, 71, 0,
+  72, 0, 0, 76, 0, 0, 79, 0, 0, 0, 81, 0, 79, 0, 76, 0,
+  78, 0, 0, 0, 0, 0, 74, 0, 78, 0, 81, 0, 0, 0, 78, 0,
+];
+const HEMI = [0, 11, 21];   // the resonance part: three Poltergeist stabs per two bars against Phobetor's two notes
+
+// the silent beat before the drop
+const hushAt = s => { const { id, lb, i } = at(s); return id === 'build' && lb === 3 && i >= 12; };
+
+// single source of truth for what plays on step s: audio, HUD and visuals all read this
+function hit(layer, s) {
+  const { sec, id, lb, i } = at(s), ch = lb % 4, D = id === 'drop', e8 = lb % 8, k = sec.k;
+  const fill = D && e8 === 7 && i >= 12 && lb !== 31;   // snare fill into the next part
+  const hemi = D && lb >> 3 === 2;
+  const early = id === 'build' && lb < 2;
+  const from = x => k >= K[x] && k < K.build;           // a teaching section, from x on
+  const groove = (id === 'spin' && lb >= 4) || from('lich') || early || (D && !fill);
+  switch (layer) {
+    case 'kick': {
+      if (fill) return 0;
+      const on = KICK[lb % 2].includes(i);
+      if (from('spin') || early) return on ? 1 : 0;
+      if (D) return on ? 1 : lb % 2 && i === 15 ? 0.5 : 0;   // a ghost kick into every other bar
+      if (id === 'outro') return lb === 0 && i === 0 ? 1 : 0;
+      return 0;
+    }
+    case 'snare':
+      if (id === 'build' && lb >= 2) return hushAt(s) || (lb === 2 && i % 2) ? 0 : 0.35 + 0.65 * ((lb - 2) * 16 + i) / 28;
+      if (fill) return 0.5 + 0.12 * (i - 12);
+      return ((id === 'spin' && lb >= 2) || groove) && (i === 4 || i === 12) ? 1 : 0;
+    case 'rim': return groove && (i === 7 || (i === 15 && lb % 2 === 0)) ? 1 : 0;
+    case 'shaker': return (groove || (id === 'build' && !hushAt(s))) ? (i % 4 === 2 ? 1 : i % 2 ? 0.45 : 0.7) : 0;
+    case 'ohat': return ((id === 'spin' && lb >= 6) || from('lich') || (D && !fill)) && i === 14 && lb % 2 === 1 ? 1 : 0;
+    case 'bass':
+      if (id === 'lich' && lb < 2) return i === 0 ? ROOT[ch] : 0;
+      if (from('lich') || early || (D && !fill)) return BASSP[i] !== undefined ? ROOT[ch] + BASSP[i] : 0;
+      if (id === 'outro') return lb === 0 && i === 0 ? ROOT[0] : 0;
+      return 0;
+    case 'bell': {
+      if (BELL_AT[i] === undefined) return 0;
+      const on = (id === 'draugr' && (lb >= 2 || i === 0 || i === 10)) || from('polter') || early || (D && !fill) || (id === 'outro' && lb < 3);
+      return on ? CHORD[ch][BELL_AT[i]] + 24 : 0;
+    }
+    case 'keys':
+      if (hemi) return HEMI.includes((lb % 2) * 16 + i) ? ch + 1 : 0;
+      if (!KEYS_AT.includes(i)) return 0;
+      if (id === 'polter') return lb < 2 && i !== 2 ? 0 : ch + 1;
+      return from('phobetor') || (id === 'build' && lb < 3) || (D && !fill) || (id === 'outro' && lb < 3) ? ch + 1 : 0;
+    case 'lead': {
+      if (hemi) return i === 0 ? CHORD[ch][3] + 12 : 0;
+      if (id === 'outro') return lb === 0 && i === 0 ? 71 : 0;
+      const n = LEAD[ch * 16 + i];
+      if (!n) return 0;
+      if (id === 'phobetor') return lb < 2 && i >= 8 ? 0 : n;
+      return (D && !fill) || early ? n : 0;
+    }
+    case 'crash': return i === 0 && ((D && e8 === 0) || (id === 'outro' && lb === 0)) ? 1 : 0;
+    case 'perc': return hit('snare', s) || hit('rim', s) || hit('ohat', s);
+  }
+  return 0;
+}
+const { pulse, countdown, sequencer } = Engine.envelopes(hit, clock);
+
+// each instrument wears one colour for the whole video, and so does the thing it stands for
+const P = {
+  ...Engine.NEUTRALS,
+  kick: '#3ae8ff', kickD: '#0c3c48', kickL: '#b0f6ff',   // the pulsar and its beams
+  perc: '#7dff3a', percD: '#1f4a10', percL: '#d4ffb4',   // the shuffle: timing
+  bass: '#a46aff', bassD: '#2e1a5e', bassL: '#dccaff',   // the lich: death and the spin-up
+  bell: '#ffe14a', bellD: '#5e4c10', bellL: '#fff4b0',   // Draugr
+  keys: '#ff3ad0', keysD: '#4e0e40', keysL: '#ff9aea',   // Poltergeist
+  lead: '#ff8a2a', leadD: '#5e2c0c', leadL: '#ffc89a',   // Phobetor
+};
+const CYC = [P.kick, P.bass, P.bell, P.keys, P.lead, P.perc];
+
+// ---------- canvas + gfx helpers ----------
+const { cx, text, card, fillCircle, ditherCircle, dEllipse, ring, line, dot, ditherFill, sun, banner, fact, timeline } = Engine.gfx(P);
+const { mulberry, hash } = Engine.rand;
+const { fmtNum, fmtBig, rough } = Engine.fmt;
+const rng = mulberry(125712);
+
+const STARS = Array.from({ length: 110 }, () => ({ x: rng() * W | 0, y: rng() * 250 | 0, b: rng(), ph: rng() * 6.28 }));
+function stars(t) {
+  for (const s of STARS) {
+    cx.fillStyle = s.b > 0.8 && Math.sin(t * 1.3 + s.ph) > 0.6 ? P.fg : s.b > 0.55 ? P.dim : P.edge;
+    cx.fillRect(s.x, s.y, 1, 1);
+  }
+}
+
+// a label on a backing box, so it reads over beams and orbits
+function tag(s, x, y, col, align = 'l') {
+  const w = s.length * 4 - 1, x0 = align === 'r' ? x - w : align === 'c' ? Math.round(x - w / 2) : x;
+  cx.fillStyle = P.bg; cx.fillRect(x0 - 1, y - 1, w + 2, 7);
+  text(s, x, y, col, 1, align);
+}
+
+// ---------- audio (everything synthesised) ----------
+const { midi, G, F, chain, pan, osc, env, play, noise, noiseSource, warm } = Engine.audio;
+let master, secGain, comp, duck, echoIn, kickIn, bassIn, percIn, bellIn, keysIn, leadIn;
+
+function buildGraph(ac, out) {
+  master = out;
+  comp = ac.createDynamicsCompressor();
+  comp.threshold.value = -14; comp.knee.value = 6; comp.ratio.value = 4; comp.attack.value = 0.004; comp.release.value = 0.15;
+  secGain = G(0.72);   // section level: the drop gets the headroom
+  chain(comp, secGain, master);
+  duck = G(1); duck.connect(comp);   // the melodic buses pump against the kick
+  // ping-pong echo, a dotted eighth: left, then right, darker each time round
+  echoIn = G(1);
+  const dl = ac.createDelay(1), dr = ac.createDelay(1), lp = F('lowpass', 2600);
+  dl.delayTime.value = dr.delayTime.value = 3 * STEP;
+  chain(echoIn, lp, dl, pan(-0.6), duck);
+  chain(dl, dr, pan(0.6), duck);
+  chain(dr, G(0.38), lp);
+  kickIn = G(0.55); chain(kickIn, warm(2), comp);
+  bassIn = G(0.28); chain(bassIn, warm(1.6), comp);
+  percIn = G(0.42); percIn.connect(comp);
+  bellIn = G(0.13); bellIn.connect(duck);
+  keysIn = G(0.2); keysIn.connect(duck);
+  leadIn = G(0.085); leadIn.connect(duck);
+}
+
+// the shared instruments, on this scene's buses
+const metal = (t, dur, vol, hp, p = 0, dest = percIn) => Engine.audio.metal(t, dur, vol, hp, p, dest);
+const riser = (t, dur, vol) => Engine.audio.riser(t, dur, vol, percIn);
+const impact = t => Engine.audio.impact(t, kickIn);
+function crash(t) { metal(t, 1.6, 0.26, 3800, -0.3); noise(t, 1.2, 0.08, 'highpass', 6000, percIn); }
+
+// punchy 2-step kick: a quick dive onto E1 with a click on top; ducks the melodic buses
+function kick(t, vel) {
+  const o = osc('sine', 190, t), g = G(1);
+  o.frequency.exponentialRampToValueAtTime(midi(28), t + 0.06);
+  env(g, t, vel, 0.001, 0.36, 0.2);
+  chain(o, g, kickIn); play(o, t, 0.36);
+  const c = osc('triangle', 2400, t), cg = G(1); env(cg, t, vel * 0.25, 0.0005, 0.008);
+  chain(c, cg, kickIn); play(c, t, 0.01);
+  duck.gain.setValueAtTime(0.45, t); duck.gain.setTargetAtTime(1, t + 0.03, 0.08);
+}
+// rimshot: two pitched clicks through a bandpass
+function rim(t, vel) {
+  const bp = F('bandpass', 1700, 3), g = G(1);
+  env(g, t, vel * 0.8, 0.0005, 0.035);
+  chain(bp, g, pan(-0.15), percIn);
+  for (const [w, f] of [[0.5, 1720], ['triangle', 480]]) { const o = osc(w, f, t); o.connect(bp); play(o, t, 0.04); }
+}
+// tight garage snare: a short tone, a bright bandpassed crack and a rim on top (no clap)
+function snare(t, vel) {
+  const o = osc('triangle', 210, t), g = G(1);
+  o.frequency.exponentialRampToValueAtTime(155, t + 0.06);
+  env(g, t, vel * 0.55, 0.001, 0.09);
+  chain(o, g, percIn); play(o, t, 0.09);
+  noise(t, 0.05 + 0.08 * vel, 0.55 * vel, 'bandpass', 3200, percIn, 0.6);
+  rim(t, vel * 0.6);
+}
+// shaker: a soft-attack swish of high noise, off to the side
+function shaker(t, vel) {
+  const s = noiseSource(), g = G(1);
+  env(g, t, 0.22 * vel, 0.006, 0.05);
+  chain(s, F('highpass', 6800), g, pan(0.35), percIn);
+  s.start(t); s.stop(t + 0.08);
+}
+
+// speed-garage bass: a pulse that drops an octave into the note ("bwoing") as its filter closes, a sine sub under it
+function bass(t, m, dur) {
+  const f = midi(m), g = G(1), lp = F('lowpass', 2600, 7);
+  lp.frequency.setValueAtTime(2600, t); lp.frequency.exponentialRampToValueAtTime(260, t + 0.28);
+  env(g, t, 0.8, 0.004, dur, 0.7);
+  chain(g, bassIn);
+  const o = osc(0.25, f * 2, t); o.frequency.exponentialRampToValueAtTime(f, t + 0.1);
+  chain(o, lp, g); play(o, t, dur);
+  const sub = osc('sine', f, t); chain(sub, G(0.9), g); play(sub, t, dur);
+}
+// Draugr's glass bell: a sine frequency-modulated at 3.5x its pitch, the brightness dying away first
+function bell(t, m, p) {
+  const f = midi(m), c = osc('sine', f, t), mo = osc('sine', f * 3.5, t), mg = G(1), g = G(1);
+  mg.gain.setValueAtTime(f * 2.2, t); mg.gain.exponentialRampToValueAtTime(f * 0.05, t + 0.5);
+  chain(mo, mg); mg.connect(c.frequency);
+  env(g, t, 0.9, 0.002, 0.9);
+  chain(c, g, pan(p), bellIn); play(c, t, 0.9); play(mo, t, 0.9);
+  chain(g, G(0.25), echoIn);
+}
+// Poltergeist's electric piano: per note two sines a hair apart (the chorus) and a soft bark an octave up, with tremolo
+function keys(t, ch, dur) {
+  const len = dur + 0.25, g = G(1), tg = G(0.88), lfo = osc('sine', 5.2, t), lg = G(0.12), lp = F('lowpass', 2400);
+  env(g, t, 0.9, 0.004, len, 0.3);
+  chain(lfo, lg); lg.connect(tg.gain); play(lfo, t, len);
+  chain(lp, tg, g, keysIn);
+  CHORD[ch].forEach((m, n) => {
+    const f = midi(m), pn = pan(n % 2 ? 0.25 : -0.25);
+    pn.connect(lp);
+    for (const [w, fm, a, det] of [['sine', 1, 0.3, -5], ['sine', 1, 0.3, 5], ['triangle', 2, 0.08, 0]]) {
+      const o = osc(w, f * fm, t); o.detune.value = det; chain(o, G(a), pn); play(o, t, len);
+    }
+  });
+}
+// Phobetor's chip lead: a 25% pulse with vibrato that creeps in, into the ping-pong echo
+function lead(t, m, dur) {
+  const o = osc(0.25, midi(m), t), g = G(1), v = osc('sine', 5.5, t), vg = G(0);
+  vg.gain.setValueAtTime(0, t); vg.gain.linearRampToValueAtTime(14, t + Math.min(dur, 0.35));
+  chain(v, vg); vg.connect(o.detune);
+  env(g, t, 0.8, 0.006, dur, 0.75);
+  chain(o, F('lowpass', 3800), g, leadIn); play(o, t, dur); play(v, t, dur);
+  chain(g, G(0.3), echoIn);
+}
+
+// a note rings until the next one on its layer (at most max steps), never into the silent beat
+function noteDur(layer, s, max) {
+  let n = 1;
+  while (n < max && !hit(layer, s + n) && !hushAt(s + n)) n++;
+  return n * STEP * 0.92;
+}
+
+function voices(s, t) {
+  const { id, lb, i } = at(s), D = id === 'drop', hemi = D && lb >> 3 === 2;
+  const ts = t + (i % 2 ? SWING * STEP : 0);   // the shuffle
+  if (i === 0) secGain.gain.setValueAtTime(D ? 0.85 : 0.72, t);
+  if (SHORT && s === 0) { impact(t); kick(t, 1); crash(t); keys(t, 0, 2 * STEP); }   // a Short must hit on frame one
+  if (id === 'title' && lb === 0 && i === 0) riser(t, 2 * BAR, 0.6);
+  if (id === 'build' && lb === 0 && i === 0) riser(t, 3.75 * BAR, 1.3);
+  if (D && lb % 8 === 7 && i === 0 && lb !== 31) riser(t, BAR * 0.97, 0.5);
+  if (hit('crash', s)) { impact(t); crash(t); }
+  const k = hit('kick', s); if (k) kick(ts, k);
+  const sn = hit('snare', s); if (sn) snare(t, sn);
+  const r = hit('rim', s); if (r) rim(ts, r * 0.5);
+  const sh = hit('shaker', s); if (sh) shaker(ts, sh);
+  if (hit('ohat', s)) metal(t, 0.25, 0.09, 7000, 0.25);
+  const b = hit('bass', s); if (b) bass(ts, b, noteDur('bass', s, 7));
+  const be = hit('bell', s); if (be) bell(ts, be, i % 2 ? 0.45 : -0.45);
+  const ky = hit('keys', s); if (ky) keys(ts, ky - 1, noteDur('keys', s, hemi ? 11 : 4));
+  const l = hit('lead', s); if (l) lead(ts, l, noteDur('lead', s, hemi ? 16 : 6));
+}
+
+// ---------- the pulsar ----------
+// magnetic axis 40 deg off the spin axis, spin axis tipped 50 deg toward us: one beam sweeps over Earth every turn
+const ALPHA = 40 * Math.PI / 180, BETA = 50 * Math.PI / 180;
+const SLOW = BEAT * F_SPIN;   // shown at one turn per beat: this many times slower than real
+// the magnetic axis at song time t, in screen space (x right, y up, z toward us)
+function beamDir(t) {
+  const ph = 2 * Math.PI * t / BEAT + Math.PI / 2;   // pointing at us on every beat
+  const mx = Math.sin(ALPHA) * Math.cos(ph), my = Math.cos(ALPHA), mz = Math.sin(ALPHA) * Math.sin(ph);
+  return [mx, my * Math.cos(BETA) - mz * Math.sin(BETA), my * Math.sin(BETA) + mz * Math.cos(BETA)];
+}
+// a dithered cone along screen direction (dx, dy), foreshortened as it turns toward or away from us
+function beam(x, y, r, dx, dy, d, L) {
+  const pl = Math.hypot(dx, dy);
+  if (pl < 0.08) return;
+  const ux = dx / pl, uy = dy / pl, len = L * pl;
+  for (let k = r; k <= len; k++) {
+    const w = Math.ceil(1 + k * 0.18), fade = 1 - k / (len + 1);
+    for (let j = -w; j <= w; j++) dot(x + ux * k - uy * j, y + uy * k + ux * j, j === 0 ? P.kickL : P.kick, d * fade * (1 - Math.abs(j) / (w + 1)));
+  }
+}
+function pulsar(x, y, r, t, L, aura = 0) {
+  const [mx, my, mz] = beamDir(t), fl = Math.exp(-(1 - mz) * 14), ke = pulse('kick', t, 9);
+  if (aura) ditherCircle(x, y, r, r + 8 + Math.round(8 * aura), P.bass, 0.3 * aura);
+  ditherCircle(x, y, r, r + 4 + Math.round(r * 0.6), P.kickD, 0.6);
+  beam(x, y, r, -mx, my, 0.35, L);              // the far beam, pointing away from us
+  fillCircle(x, y, r, P.kick);
+  if (r > 2) fillCircle(x, y, r - 1, P.kickL);
+  if (r > 5) fillCircle(x - (r >> 2), y - (r >> 2), r >> 1, P.white);
+  beam(x, y, r, mx, -my, 0.5 + 0.35 * ke, L);   // the near beam, brighter on the kicks
+  if (fl > 0.05) {   // it sweeps over Earth: a pulse
+    ditherCircle(x, y, r, r + 2 + Math.round((r * 0.6 + 5) * fl), P.kickL, 0.45 * fl);
+    if (fl > 0.5) fillCircle(x, y, r, P.white);
+  }
+}
+
+// ---------- the system: orbits sized by Kepler, seen tilted ----------
+const SY = Math.cos(50 * Math.PI / 180);
+const RPX = 70 / PHOB.a;   // px per metre at scale 1
+const EXAG = 3 / (POLTER.aPsr * RPX * 0.6);   // the drop's wobble view: Poltergeist's tug scaled up to 3 px
+
+function planet(q, t) {
+  const l = q.p.layer, g = pulse(l, t, 7), r = q.p.px;
+  ditherCircle(q.x, q.y, 0, r + 2 + Math.round(5 * g), P[l], 0.2 + 0.4 * g);
+  fillCircle(q.x, q.y, r, g > 0.5 ? P[l + 'L'] : P[l]);
+}
+// o = { show: planets 1..3, tag: index to label, lines: pulsar-to-planet lines, wob: wobble scale, L: beam length, r: pulsar radius }
+function system(x, y, sc, t, o = {}) {
+  const qs = [];
+  let wx = 0, wy = 0;
+  for (let k = 0; k < (o.show ?? 3); k++) {
+    const p = PLANETS[k], th = theta(p, t), R = p.a * RPX * sc, c = Math.cos(th), s = Math.sin(th);
+    qs.push({ p, k, R, x: x + R * c, y: y + R * s * SY, front: s > 0 });
+    if (o.wob) { const f = p.aPsr / p.a * o.wob; wx -= f * R * c; wy -= f * R * s * SY; }   // the star circles the balance point
+  }
+  for (const q of qs) ring(x, y, q.R, P[q.p.layer + 'D'], 1, 1, SY, Math.PI, 2 * Math.PI);   // far halves
+  for (const q of qs) if (!q.front) planet(q, t);
+  const px = Math.round(x + wx), py = Math.round(y + wy);
+  if (o.lines) for (const q of qs) if (q.k > 0) line(px, py, Math.round(q.x), Math.round(q.y), P[q.p.layer], 0.5);
+  pulsar(px, py, o.r ?? Math.max(2, Math.round(4 * sc)), t, o.L ?? Math.round(60 * sc));
+  for (const q of qs) ring(x, y, q.R, P[q.p.layer + 'D'], 1, 1, SY, 0, Math.PI);             // near halves
+  for (const q of qs) if (q.front) planet(q, t);
+  const q = qs[o.tag];
+  if (q) tag(`${q.p.name} ${q.p.days.toFixed(1)} D`, clamp(Math.round(q.x), 38, 142), Math.round(q.y) - 10, P[q.p.layer + 'L'], 'c');
+}
+
+// pulses on their way to Earth, one per beat (slowed); with shift (px per ms), each lands early or late by the residual
+function strip(t, y, shift = 0) {
+  const x0 = 14, x1 = 160, trip = 4 * BEAT, b = Math.floor(t / BEAT);
+  line(x0, y + 2, x1, y + 2, P.edge);
+  text('PULSES', x0, y - 8, P.kick);
+  text('EARTH', 176, y - 8, P.fg, 1, 'r');
+  for (let k = 0; k <= 4; k++) {
+    const te = (b - k) * BEAT, f = (t - te) / trip;
+    if (f < 0 || f >= 1) continue;
+    const xs = x0 + f * (x1 - x0);
+    if (shift) { cx.fillStyle = P.edge; cx.fillRect(Math.round(xs), y - 1, 1, 7); }   // where a perfect clock's pulse would be
+    cx.fillStyle = P.kickL; cx.fillRect(Math.round(xs - shift * residual(te)), y, 2, 5);
+  }
+  const ar = Math.exp(-(t % BEAT) * 10);
+  ditherCircle(168, y + 2, 0, 4 + Math.round(5 * ar), P.kickL, 0.5 * ar);
+  fillCircle(168, y + 2, 3, P.fg);
+}
+
+// arrival time against a perfect clock over the last two Phobetor years: each planet's part, and the sum
+function residualPlot(t, x0, y0, w, h) {
+  const d1 = daysAt(t), span = 2 * PHOB.days, ym = y0 + (h >> 1), sc = (h / 2 - 3) / X_MAX;
+  cx.fillStyle = P.edge;
+  cx.fillRect(x0, y0, w, 1); cx.fillRect(x0, y0 + h, w, 1); cx.fillRect(x0, y0, 1, h + 1); cx.fillRect(x0 + w - 1, y0, 1, h + 1);
+  for (let px = 1; px < w - 1; px += 3) cx.fillRect(x0 + px, ym, 1, 1);
+  let last = ym;
+  for (let px = 1; px < w - 1; px++) {
+    const d = d1 - span + px / (w - 2) * span;
+    for (const p of PLANETS) dot(x0 + px, ym - p.xMs * Math.sin(thetaD(p, d)) * sc, P[p.layer + 'D'], 1);
+    last = Math.round(ym - residualD(d) * sc);
+    cx.fillStyle = P.white; cx.fillRect(x0 + px, last, 1, 1);
+  }
+  fillCircle(x0 + w - 2, last, 1, P.kickL);
+  text('LATE', x0 + 3, y0 + 3, P.dim); text('EARLY', x0 + 3, y0 + h - 7, P.dim);
+  text(`${fmtNum(X_MAX)} MS`, x0 + w - 3, y0 + 3, P.fg, 1, 'r');
+}
+
+// ---------- HUD: the live step sequencer ----------
+const ROWS = [['KIK', 'kick', P.kick, P.kickD], ['PRC', 'perc', P.perc, P.percD], ['BAS', 'bass', P.bass, P.bassD],
+              ['BEL', 'bell', P.bell, P.bellD], ['KEY', 'keys', P.keys, P.keysD], ['LED', 'lead', P.lead, P.leadD]];
+const hud = sequencer(ROWS);
+
+// ---------- scenes ----------
+const ORBIT_TIME = `SCHEMATIC: 1 BAR = ${fmtNum(DPB)} DAYS. SPIN SLOWED`;
+
+function sceneTitle(lt, t, ctl) {
+  stars(t);
+  system(90, 160, 0.9, t);
+  card([{ t: 'PSR B1257+12', s: 2, c: P.kick }, { t: 'LICH', s: 3, c: P.bassL }, { t: `CHIP 2-STEP GARAGE - ${BPM} BPM`, c: P.dim }], 30);
+  text('A DEAD STAR WITH THREE WORLDS', 90, 222, P.dim, 1, 'c');
+  const on = ((t * 2) | 0) % 2 === 0;   // song time when playing; the not-started card is passed wall-clock seconds
+  if (!ctl.started) { if (on) card([{ t: 'TAP TO START', c: P.kick, s: 2 }], 250); }
+  else if (on) card([{ t: 'HOW DO YOU FIND A WORLD IN THE DARK?', c: P.kick }], 250);
+}
+
+function sceneSpin(lt, t) {
+  stars(t);
+  const x = 90, y = 100, r = 12;
+  pulsar(x, y, r, t, 80);
+  line(x - r, y + r + 7, x + r, y + r + 7, P.dim);
+  tag(`~${fmtNum(2 * PSR.rkm)} KM`, x, y + r + 10, P.dim, 'c');
+  strip(t, 180);
+  banner('1. THE LIGHTHOUSE', 'LAYER 1: 2-STEP DRUMS = THE PULSAR', P.kick);
+  fact(lb(lt) < 4 ? ['A DEAD STAR: A NEUTRON STAR', { t: `${fmtNum(PSR.mass)} SUNS IN A ${fmtNum(2 * PSR.rkm)} KM BALL`, c: P.kick }, { t: 'RADIO BEAMS FROM ITS POLES', c: P.dim }]
+                  : ['IT SPINS LIKE A LIGHTHOUSE', { t: `${F_SPIN.toFixed(1)} TURNS EVERY SECOND`, c: P.kick }, { t: 'EACH SWEEP OVER US: A PULSE', c: P.dim }], P.kick);
+  timeline(`SLOWED ${Math.round(SLOW)}X: 1 TURN PER BEAT`);
+}
+
+function sceneLich(lt, t) {
+  stars(t);
+  const x = 90, y = 112, be = pulse('bass', t, 6);
+  if (lb(lt) < 4) {   // the supernova's shell, still flying outward
+    ring(x, y, 14 + lt * 9, P.bass, 2, Math.max(0, 0.7 - lt * 0.08));
+    ring(x, y, 8 + lt * 6, P.bassD, 2, Math.max(0, 0.6 - lt * 0.06));
+  } else {            // a companion star feeds it gas, spinning it back up
+    const sx = 148, sy = 62, q = 0.45, a0 = Math.atan2((sy - y) / q, sx - x), R0 = Math.hypot(sx - x, (sy - y) / q);
+    sun(sx, sy, 9, [P.bassD, P.bass, P.bassL, P.fg], t, 0.3);
+    dEllipse(x, y, 18, 6, 0, P.bass, 0.3 + 0.3 * be);
+    for (let k = 0; k < 40; k++) {
+      const u = (k / 40 + t * 0.3) % 1, rr = R0 * (1 - u) ** 1.3 + 3, a = a0 + u * 2.4 * Math.PI;
+      dot(x + rr * Math.cos(a), y + rr * Math.sin(a) * q, u > 0.8 ? P.bassL : P.bass, 0.9);
+    }
+  }
+  pulsar(x, y, 6, t, 60, be);
+  banner('2. THE LICH', 'LAYER 2: BWOING BASS = UNDEAD STAR', P.bass);
+  fact(lb(lt) < 4 ? ['ONCE A BIG STAR. IT EXPLODED', { t: 'SUPERNOVA: DEAD... BUT', c: P.bass }, { t: 'ITS CORE KEPT SPINNING', c: P.dim }]
+                  : ['A COMPANION FED IT GAS:', { t: 'SPUN UP, RISEN. A LICH', c: P.bass }, { t: `EQUATOR AT ${Math.round(V_EQ * 1e5 / C)}% OF LIGHT SPEED`, c: P.dim }], P.bass);
+  timeline('SCHEMATIC. NOT TO SCALE');
+}
+
+function planetScene(k, title, sub, lines, lt, t) {
+  stars(t);
+  system(90, 112, 1, t, { show: k + 1, tag: k, lines: k === 2 && lb(lt) >= 4 });
+  const col = P[PLANETS[k].layer];
+  banner(title, sub, col);
+  fact(lines, col);
+  timeline(ORBIT_TIME);
+}
+function sceneDraugr(lt, t) {
+  const c = P.bell;
+  planetScene(0, '3. DRAUGR', 'LAYER 3: BELLS = WORLD 1', lb(lt) < 4
+    ? ['WORLD 1: DRAUGR', { t: `${fmtNum(DRAUGR.me)} EARTHS: ${fmtNum(DRAUGR.moons)} MOONS`, c }, { t: 'LIGHTEST PLANET EVER FOUND', c: P.dim }]
+    : [`ONE LAP: ${DRAUGR.days.toFixed(1)} DAYS`, { t: `${fmtNum(DRAUGR.au)} AU: CLOSER THAN MERCURY`, c }, { t: 'NAMED FOR A NORSE UNDEAD', c: P.dim }], lt, t);
+}
+function scenePolter(lt, t) {
+  const c = P.keys;
+  planetScene(1, '4. POLTERGEIST', 'LAYER 4: KEYS = WORLD 2', lb(lt) < 4
+    ? ['WORLD 2: POLTERGEIST', { t: `${fmtNum(POLTER.me)} EARTHS, ${fmtNum(POLTER.au)} AU OUT`, c }, { t: `ONE LAP: ${POLTER.days.toFixed(1)} DAYS`, c: P.dim }]
+    : ['NO SUNSHINE HERE', { t: 'JUST X-RAYS AND A PARTICLE WIND', c }, { t: 'FROM A DEAD STAR', c: P.dim }], lt, t);
+}
+function scenePhobetor(lt, t) {
+  const c = P.lead;
+  planetScene(2, '5. PHOBETOR', 'LAYER 5: CHIP LEAD = WORLD 3', lb(lt) < 4
+    ? ['WORLD 3: PHOBETOR', { t: `${fmtNum(PHOB.me)} EARTHS, ${fmtNum(PHOB.au)} AU OUT`, c }, { t: 'GREEK GOD OF NIGHTMARES', c: P.dim }]
+    : [`ONE LAP: ${PHOB.days.toFixed(1)} DAYS`, { t: `= ${RATIO.toFixed(2)} POLTERGEIST LAPS`, c }, { t: 'NEARLY 3:2. THEY TUG EACH OTHER', c: P.dim }], lt, t);
+}
+
+function sceneBuild(lt, t, sec) {
+  stars(t);
+  system(90, 112, 1, t);
+  strip(t, 180);
+  banner('6. HOW DO WE KNOW?', 'BUILD: SNARE ROLL + RISER', P.perc);
+  fact(["WE CAN'T SEE THE PLANETS", { t: 'BUT WE CAN TIME THE PULSES', c: P.perc }, { t: `${F_SPIN.toFixed(1)} EVERY SECOND`, c: P.dim }], P.perc);
+  timeline('SPIN SLOWED: 1 PULSE PER BEAT');
+  countdown(lt, sec, () => {   // drawn last so the digits sit on top; the silent beat wipes the scene
+    cx.fillStyle = P.bg; cx.fillRect(0, 0, W, H);
+    pulsar(90, 120, 8, t, 70);
+    text('TIME IT.', 90, 176, P.white, 3, 'c');
+  }, 90, 70);
+}
+
+// --- the drop: four 8-bar parts ---
+const PART_COL = [P.kick, P.perc, P.keys, P.bell];
+const SHIFT = 4;   // px per ms of timing residual on the pulse strip
+const lapsSince = (p, t, t0) => (daysAt(t) - daysAt(t0)) / p.days;
+const DROP_TXT = [
+  (e8, c) => ({ title: '7. THE LICH SYSTEM', time: ORBIT_TIME,
+    lines: e8 < 4 ? ['THREE WORLDS CIRCLE', { t: 'A DEAD, SPINNING STAR', c }, { t: `${fmtBig(PSR.ly)} LIGHT YEARS AWAY`, c: P.dim }]
+                  : ['DRAUGR, POLTERGEIST', { t: 'AND PHOBETOR', c }, { t: 'ALL CLOSER IN THAN VENUS', c: P.dim }] }),
+  (e8, c) => ({ title: '8. THE WOBBLE', time: `SCHEMATIC. WOBBLE X ${rough(EXAG)}`,
+    lines: e8 < 4 ? ['EACH WORLD TUGS THE STAR', { t: `UP TO ${fmtNum(V_TUG)} M/S: SLOWER THAN A WALK`, c }, { t: 'TOWARD US, THEN AWAY', c: P.dim }]
+                  : ['SO ITS PULSES ARRIVE', { t: `UP TO ${fmtNum(X_MAX)} MS EARLY OR LATE`, c }, { t: 'TIMED TO MILLIONTHS OF A SECOND', c: P.dim }] }),
+  (e8, c, t) => ({ title: '9. 3:2 RESONANCE', time: `SCHEMATIC: 1 BAR = ${fmtNum(2 * DPB)} DAYS`,
+    lines: [{ t: `POLTERGEIST: ${lapsSince(POLTER, t, FAST0).toFixed(1)} LAPS`, c: P.keys }, { t: `PHOBETOR: ${lapsSince(PHOB, t, FAST0).toFixed(1)} LAPS`, c: P.lead },
+            { t: e8 < 4 ? 'KEYS 3 TO THE LEAD 2' : 'THEIR TUGS PROVED THEM REAL', c: P.dim }] }),
+  (e8, c) => ({ title: '10. FIRST WORLDS', time: ORBIT_TIME,
+    lines: e8 < 4 ? ['1992: THE FIRST PLANETS', { t: 'EVER FOUND BEYOND THE SUN', c }, { t: 'WOLSZCZAN AND FRAIL, ARECIBO', c: P.dim }]
+                  : ['3 YEARS BEFORE ANY AROUND', { t: 'A LIVING, SUNLIKE STAR', c }, { t: 'WORLDS AROUND A CORPSE', c: P.dim }] }),
+];
+
+function sceneDrop(lt, t) {
+  const bar = lb(lt), part = bar >> 3, e8 = bar % 8, col = PART_COL[part];
+  stars(t);
+  if (part === 1) {
+    system(90, 72, 0.6, t, { wob: EXAG, L: 34 });
+    residualPlot(t, 16, 114, 148, 48);
+    strip(t, 180, SHIFT);
+  } else system(90, 112, 1, t, { lines: part === 2 });
+  const r = DROP_TXT[part](e8, col, t);
+  if (!CALM) ditherFill(CYC[Math.floor(t / BEAT) % 6], 0.07 * pulse('kick', t, 8));
+  banner(r.title, 'ALL LAYERS: THE DROP!', col, CYC[Math.floor(t / BEAT) % 6]);
+  fact(r.lines, col);
+  timeline(r.time);
+}
+
+function sceneOutro(lt, t, sec) {
+  stars(t);
+  system(90, 112, 1, t);
+  ditherFill(P.bg, 0.85 * smooth((lt - secDur(sec) + 1.5 * BAR) / (1.5 * BAR)));   // the system fades; the words stay
+  banner('THE END', 'KEYS + BELLS: STILL TICKING', P.keys);
+  fact(['A DEAD STAR, STILL TICKING', { t: `${fmtBig(TURNS_DAY)} TURNS A DAY`, c: P.kick }, { t: 'THREE WORLDS IN ITS LIGHT', c: P.dim }], P.keys);
+  timeline(ORBIT_TIME);
+}
+
+const SCENES = { spin: sceneSpin, lich: sceneLich, draugr: sceneDraugr, polter: scenePolter, phobetor: scenePhobetor,
+                 build: sceneBuild, drop: sceneDrop, outro: sceneOutro };
+
+// ---------- one frame at song time tau; the engine's main loop calls it ----------
+function draw(tau) {
+  const t = tau % LOOP;
+  const bar = Math.floor(t / BAR), sec = SONG[BAR_SEC[bar]], lt = t - sec.start * BAR;
+  cx.setTransform(1, 0, 0, 1, 0, 0);
+  cx.fillStyle = P.bg; cx.fillRect(0, 0, W, H);
+  const ke = pulse('kick', t, 12), D = sec.id === 'drop';
+  if (!CALM && D && ke > 0.3) {   // screen shake on the drop's kicks
+    const s = Math.floor(t / STEP);
+    cx.setTransform(1, 0, 0, 1, Math.round((hash(s) - 0.5) * 4 * ke), Math.round((hash(s + 99) - 0.5) * 4 * ke));
+  }
+  if (sec.id === 'title') sceneTitle(lt, t, { started: true });
+  else SCENES[sec.id](lt, t, sec);
+  cx.setTransform(1, 0, 0, 1, 0, 0);
+  if (sec.id !== 'title') hud(t);
+  if (lt < 0.3 && !D && sec.k > 0) ditherFill(P.bg, 1 - lt / 0.3);   // fade in each section
+  const pl = lt % (8 * BAR);
+  if (D && !CALM && pl < 0.3) ditherFill(P.white, 0.7 * (1 - pl / 0.3));
+}
+
+// numbers behind the scene, for checking without ears: window.__phys()
+window.__phys = () => ({
+  F_SPIN, TURNS_DAY, V_EQ, V_EQ_C: V_EQ * 1000 / C, SLOW, DPB, RATIO, X_MAX, V_TUG, EXAG, LOOP,
+  planets: PLANETS.map(p => ({ name: p.name, au: p.au, xMs: p.xMs, vTug: p.vTug, moons: p.moons })),
+});
+
+Engine.run({
+  clock, buildGraph, voices, draw,
+  title: sceneTitle,
+  paused: P.kick,
+  thumb: DROP0 * BAR + 2 * BAR + 6 * STEP,   // two bars into the drop, between kicks
+});
+})();
+</script>
+</body>
+</html>
