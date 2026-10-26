@@ -296,6 +296,7 @@ const audio = { ctx, midi, track, G, F, chain, pan, pulseWave, warm, osc, env, p
 //   paused,             colour of the PAUSED card
 //   thumb,              song time of the video thumbnail
 // }
+// returns { levels(bar0, bars, sr, setup) }, the offline level check behind window.__render
 function run(scene) {
   const { STEP, BAR, LOOP, TOTAL_STEPS, SONG, BAR_SEC } = scene.clock;
 
@@ -339,11 +340,12 @@ function run(scene) {
     ac.resume();
   }
 
-  // render steps offline on a fresh graph, then hand the live context back
-  async function renderOffline(s0, steps, t0, sr) {
+  // render steps offline on a fresh graph, then hand the live context back; setup() runs once the graph is built
+  async function renderOffline(s0, steps, t0, sr, setup) {
     const live = ac;
     ac = new OfflineAudioContext(2, Math.ceil((steps * STEP + t0 + 1) * sr), sr);
     build(); master.gain.value = 0.9;
+    if (setup) setup();
     for (let s = s0; s < s0 + steps; s++) playStep(s, t0 + (s - s0) * STEP);
     const buf = await ac.startRendering();
     ac = live;
@@ -379,9 +381,10 @@ function run(scene) {
     requestAnimationFrame(frame);
   }
 
-  // offline render for checking levels without ears: __render(fromBar, bars) -> per-bar peak/rms
-  window.__render = async (bar0, bars, sr = 22050) => {
-    const buf = await renderOffline(bar0 * 16, bars * 16, 0.05, sr);
+  // offline render for checking levels without ears: per-bar peak/rms of bars from bar0.
+  // window.__render(bar0, bars, sr) by default; a scene with extra options wraps the returned levels() in its own
+  async function levels(bar0, bars, sr = 22050, setup) {
+    const buf = await renderOffline(bar0 * 16, bars * 16, 0.05, sr, setup);
     const L = buf.getChannelData(0), out = [];
     for (let b = 0; b < bars; b++) {
       let pk = 0, sum = 0, n = 0;
@@ -390,7 +393,8 @@ function run(scene) {
       out.push({ bar: bar0 + b, sec: s.id, lb: bar0 + b - s.start, peak: +pk.toFixed(3), rms: +Math.sqrt(sum / n).toFixed(3) });
     }
     return out;
-  };
+  }
+  window.__render = (bar0, bars, sr) => levels(bar0, bars, sr);
   window.__song = () => SONG.map(s => ({ id: s.id, start: s.start * BAR, bars: s.bars }));
 
   // video export (scene-to-short): one loop of frames and audio, rendered offline on the same clock
@@ -405,6 +409,7 @@ function run(scene) {
   };
 
   frame();
+  return { levels };
 }
 
 return {
