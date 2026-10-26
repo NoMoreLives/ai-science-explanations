@@ -79,7 +79,7 @@ const FONT = {
   '=':'000 111 000 111 000', '+':'000 010 111 010 000', '!':'010 010 010 000 010', '?':'110 001 010 000 010',
   '>':'100 010 001 010 100', '<':'001 010 100 010 001', '/':'001 001 010 100 100', ',':'000 000 000 010 100',
   '(':'010 100 100 100 010', ')':'010 001 001 001 010', "'":'010 010 000 000 000', '~':'000 011 110 000 000',
-  '^':'010 101 000 000 000', '#':'101 111 101 111 101', '%':'101 001 010 100 101',
+  '^':'010 101 000 000 000', '#':'101 111 101 111 101', '%':'101 001 010 100 101', '*':'010 111 010 101 000',
 };
 const GL = {};
 for (const k in FONT) GL[k] = FONT[k].replace(/ /g, '');
@@ -275,11 +275,13 @@ function noiseSource(loop = false) {
   const s = track(ac.createBufferSource()); s.buffer = noiseBuf; s.loop = loop;
   return s;
 }
+// a burst of filtered noise; returns the filter so callers can sweep it
 function noise(t, dur, vol, type, f, dest, Q = 0.8) {
   const s = noiseSource(), b = F(type, f, Q), g = G(1);
   g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
   chain(s, b, g, dest);
   s.start(t, Math.random() * 0.5); s.stop(t + dur + 0.03);
+  return b;
 }
 
 const audio = { ctx, midi, track, G, F, chain, pan, pulseWave, warm, osc, env, play, noise, noiseSource };
