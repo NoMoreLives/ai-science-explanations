@@ -1,0 +1,1154 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Time Dilation: Ambient Chip Mix</title>
+<link rel="icon" type="image/svg+xml" href="icon.svg">
+<style>
+  html,body{margin:0;height:100%;background:#020108;color:#6f74a6;font:12px monospace}
+  body{display:flex;flex-direction:column;align-items:center;justify-content:center}
+  canvas{height:min(92vh,calc(100vw*16/9));aspect-ratio:9/16;image-rendering:pixelated;cursor:pointer;background:#04050f}
+  p{margin:6px 16px 0;text-align:center}
+</style>
+</head>
+<body>
+<canvas id="c" width="180" height="320"></canvas>
+<p>click / space: play-pause &middot; m: mute &middot; headphones help: the probe's note falls from 440 Hz to 110 Hz &middot; ?bpm=80 &amp;f0=440 (Hz) &amp;mass=4300000 (suns) &amp;calm=1 (no flashes)</p>
+<script>
+(() => {
+'use strict';
+
+// ---------- config ----------
+const q = new URLSearchParams(location.search);
+const num = (k, d, lo, hi) => { const n = parseFloat(q.get(k)); return n >= lo && n <= hi ? n : d; };
+const BPM = num('bpm', 80, 60, 100);
+const F0 = num('f0', 440, 220, 880);          // the probe's note in its own frame: the key of the track
+const MASS = num('mass', 4.3e6, 5, 1e11);     // suns; Sgr A*, the black hole at the centre of our galaxy
+const CALM = q.get('calm') === '1';           // no flashes
+const SHORT = q.get('short') === '1';         // YouTube Short: a hit on the first frame
+const DEBUG_T = q.has('t') ? parseFloat(q.get('t')) || 0 : null; // freeze visuals at t seconds (no audio)
+
+// Schwarzschild: a clock hovering at radius r (in horizon radii RS) runs at k = sqrt(1 - RS/r) of a far-away one.
+// From far away we hear its note at F0 k and its ticks k times as often. Every number drawn or played comes from k.
+const GM_SUN = 1.32712e20, C = 2.99792458e8, G_EARTH = 9.80665;
+const GM = GM_SUN * MASS, RS = 2 * GM / C ** 2;      // horizon radius, m
+const SGR = MASS === 4.3e6, NAME = SGR ? 'SGR A*' : 'THE HOLE';
+const rateAt = r => Math.sqrt(Math.max(0, 1 - 1 / r));
+const rOfK = k => 1 / (1 - k * k);
+const hoverG = r => GM / (r * RS) ** 2 / rateAt(r) / G_EARTH;   // thrust per kg to hover at r, in Earth g
+const OCT_S = 2 * RS / C * Math.LN2;   // falling in, its note drops an octave about this often (late on)
+
+// the stops: where the clock rate is a just interval, so the note the probe sings stays in the key
+const STOPS = [[1, '1'], [8 / 9, '8/9'], [4 / 5, '4/5'], [2 / 3, '2/3'], [1 / 2, '1/2'], [1 / 4, '1/4']]
+  .map(([k, frac]) => ({ k, frac, r: k === 1 ? Infinity : rOfK(k), f: F0 * k }));
+const K_END = STOPS[5].k / 16;         // tether cut: 4 more octaves, into silence
+
+const NOTES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+const noteOf = f => { const m = Math.round(69 + 12 * Math.log2(f / 440)); return NOTES[(m % 12 + 12) % 12] + (Math.floor(m / 12) - 1); };
+const letterOf = f => noteOf(f).replace(/-?\d+$/, '');
+const KEY = letterOf(F0);
+
+const W = 180, H = 320;
+const STEP = 60 / BPM / 4, BAR = STEP * 16, BEAT = STEP * 4;
+
+// the track: one section per stage, each introducing one layer
+const SONG = [
+  { id: 'title', bars: 2 },
+  { id: 'far', bars: 8 },     // layer 1: drone pad
+  { id: 'st1', bars: 8 },     // layer 2: the beacon (a pure sine + ticks) and pulse bells
+  { id: 'st2', bars: 8 },     // layer 3: soft drums
+  { id: 'st3', bars: 8 },     // layer 4: echo arp
+  { id: 'build', bars: 4 },   // layer 5: triangle bass, and the probe sinks to half speed
+  { id: 'drop', bars: 24 },   // everything: half time, the scale of gravity, quarter time
+  { id: 'outro', bars: 4 },   // the tether is cut
+];
+const BAR_SEC = [];
+{ let a = 0; SONG.forEach((s, k) => { s.start = a; s.k = k; a += s.bars; for (let b = 0; b < s.bars; b++) BAR_SEC.push(k); }); }
+const TOTAL_STEPS = BAR_SEC.length * 16;
+const LOOP = TOTAL_STEPS * STEP;
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const mod = s => ((s % TOTAL_STEPS) + TOTAL_STEPS) % TOTAL_STEPS;
+
+// ---------- the probe's clock rate over the song, k(beat) ----------
+// held at each stop, gliding between them evenly in pitch (log k), the same curve the sine's frequency ramp follows
+const B0 = id => SONG.find(s => s.id === id).start * 4;      // where a section starts, in beats
+const [S1, S2, S3, SB, SD, SO] = ['st1', 'st2', 'st3', 'build', 'drop', 'outro'].map(B0);
+const SE = TOTAL_STEPS / 4;
+const G_B = 12;     // the build's slide down to half speed, beats
+function makeKeys(g3, gC) {
+  const k = STOPS.map(s => s.k);
+  return [[0, 1], [S1 + 8, 1], [S1 + 16, k[1]], [S2, k[1]], [S2 + 8, k[2]], [S3, k[2]], [S3 + g3, k[3]],
+          [SB, k[3]], [SB + G_B, k[4]], [SD + 64 - gC, k[4]], [SD + 64, k[5]], [SO, k[5]], [SE, K_END]];
+}
+// probe time elapsed over a stretch where k goes k0 -> k1 evenly in log k (fraction u of length L)
+const segTau = (k0, k1, L, u) => k0 === k1 ? k0 * L * u : k0 * L * ((k1 / k0) ** u - 1) / Math.log(k1 / k0);
+function tauOn(keys, b) {
+  let T = 0;
+  for (let j = 0; j < keys.length - 1; j++) {
+    const [a, k0] = keys[j], [c, k1] = keys[j + 1];
+    if (b <= a) break;
+    if (c > a) T += segTau(k0, k1, c - a, Math.min(1, (b - a) / (c - a)));
+  }
+  return T;
+}
+// glide lengths chosen so a whole number of probe beats passes from the beacon switching on to the drop,
+// and from the drop to its quarter-time part: then its ticks land on our half notes, then on our bars
+function fit(f, lo, hi, prefer) {
+  const a = f(lo), b = f(hi), n0 = Math.ceil(Math.min(a, b)), n1 = Math.floor(Math.max(a, b));
+  if (n0 > n1) return prefer;
+  const N = clamp(Math.round(f(prefer)), n0, n1);
+  for (let i = 0; i < 60; i++) { const m = (lo + hi) / 2; if ((f(m) - N) * (a - N) > 0) lo = m; else hi = m; }
+  return (lo + hi) / 2;
+}
+const G_3 = fit(g => { const ks = makeKeys(g, 8); return tauOn(ks, SD) - tauOn(ks, S1); }, 3, 24, 8);
+const G_C = fit(g => { const ks = makeKeys(G_3, g); return tauOn(ks, SD + 64) - tauOn(ks, SD); }, 2, 14, 8);
+const KEYS = makeKeys(G_3, G_C);
+const TAUK = KEYS.map(([b]) => tauOn(KEYS, b));
+function seg(b) { let j = 0; while (j < KEYS.length - 2 && b >= KEYS[j + 1][0]) j++; return j; }
+function kAtB(b) {
+  const j = seg(b), [a, k0] = KEYS[j], [c, k1] = KEYS[j + 1];
+  return c > a ? k0 * (k1 / k0) ** clamp((b - a) / (c - a), 0, 1) : k1;
+}
+const kAt = ts => kAtB(ts / BEAT);              // the probe's clock rate at song time ts (s)
+function tauAt(ts) {                            // the probe's clock at song time ts, in its own seconds
+  const b = ts / BEAT, j = seg(b), [a, k0] = KEYS[j], [c, k1] = KEYS[j + 1];
+  return (TAUK[j] + (c > a ? segTau(k0, k1, c - a, clamp((b - a) / (c - a), 0, 1)) : 0)) * BEAT;
+}
+const beaconOn = ts => ts >= S1 * BEAT;
+
+// it ticks once per beat of its own time: when each tick reaches us
+const TICKS = [];
+{
+  const end = tauAt(LOOP - 1e-6);
+  for (let n = 0; S1 * BEAT + n * BEAT <= end; n++) {
+    const T = S1 * BEAT + n * BEAT;
+    let lo = 0, hi = LOOP;
+    for (let i = 0; i < 60; i++) { const m = (lo + hi) / 2; if (tauAt(m) < T) lo = m; else hi = m; }
+    TICKS.push((lo + hi) / 2);
+  }
+}
+const TICK_AT = new Map();
+TICKS.forEach(tk => { const st = Math.floor(tk / STEP + 1e-6); if (!TICK_AT.has(st)) TICK_AT.set(st, []); TICK_AT.get(st).push(tk); });
+const ticksIn = s => TICK_AT.get(mod(s)) || [];
+function lastTick(ts) {
+  let lo = 0, hi = TICKS.length - 1;
+  if (!TICKS.length || ts < TICKS[0]) return null;
+  while (lo < hi) { const m = (lo + hi + 1) >> 1; if (TICKS[m] <= ts) lo = m; else hi = m - 1; }
+  return TICKS[lo];
+}
+
+// ---------- the music, in just intonation on F0, so the probe's falling note locks to it ----------
+const RATIO = { A: 1, B: 9 / 8, C: 6 / 5, D: 4 / 3, E: 3 / 2, F: 8 / 5, G: 16 / 9 };
+// 'C5' -> Hz, with A4 = F0 and octaves counted from C as usual
+const J = n => { const L = n[0], o = +n.slice(1); return F0 * RATIO[L] * 2 ** ((L === 'A' || L === 'B' ? o : o - 1) - 4); };
+// Am G F Dm: drones low and shimmer high while the beacon sings in the middle; once it falls, the pad moves up
+const CHORDS = [
+  { low: ['A2', 'E3'], mid: ['A4', 'C5', 'E5'], hi: ['A5', 'C6', 'E6'], arp: ['E5', 'A5', 'C6'], bass: 'A1' },
+  { low: ['G2', 'D3'], mid: ['B4', 'D5', 'G5'], hi: ['G5', 'B5', 'D6'], arp: ['D5', 'G5', 'B5'], bass: 'G1' },
+  { low: ['F2', 'C3'], mid: ['A4', 'C5', 'F5'], hi: ['F5', 'A5', 'C6'], arp: ['C5', 'F5', 'A5'], bass: 'F1' },
+  { low: ['D2', 'A2'], mid: ['A4', 'D5', 'F5'], hi: ['F5', 'A5', 'D6'], arp: ['D5', 'F5', 'A5'], bass: 'D2' },
+];
+const ARPI = [0, 1, 2, 3, 4, 3, 2, 1, 0, 1, 2, 3, 5, 4, 3, 1];
+const arpTone = (ch, k) => J(CHORDS[ch].arp[k % 3]) * 2 ** Math.floor(k / 3);
+const HATV = [0.5, 0.15, 0.3, 0.15, 0.45, 0.15, 0.3, 0.2, 0.5, 0.15, 0.3, 0.15, 0.45, 0.2, 0.3, 0.25];
+// the probe's own song, 2 bars of its time: we hear it at half, then quarter, tempo and pitch
+const MOTIF = Array.from({ length: 32 }, (_, i) => ({ 0: 'E6', 3: 'C6', 6: 'A5', 8: 'D6', 11: 'B5', 14: 'G5',
+  16: 'C6', 19: 'A5', 22: 'F5', 24: 'F5', 26: 'A5', 28: 'D6', 30: 'E6' })[i] || 0);
+const SD_S = SD * 4, GC_S = Math.ceil((SD + 64 - G_C) * 4), SC_S = (SD + 64) * 4, SO_S = SO * 4, S1_S = S1 * 4;
+
+function at(s) {
+  s = mod(s);
+  const bar = (s / 16) | 0, sec = SONG[BAR_SEC[bar]];
+  return { sec, id: sec.id, lb: bar - sec.start, i: s % 16 };
+}
+// the silent beats: only the probe sounds in them
+function hushAt(s) {
+  const { id, lb, i } = at(s);
+  return i >= 12 && ((id === 'build' && lb === 3) || (id === 'drop' && lb === 15));
+}
+// one chord a bar; one per two bars once the probe's time runs at a quarter
+function chordAt(s) {
+  const { id, lb } = at(s);
+  if (id === 'outro') return 0;
+  return id === 'drop' && lb >= 16 ? ((lb - 16) >> 1) % 4 : lb % 4;
+}
+// the probe's song on step s (its local steps land on ours while its rate holds at 1/2 or 1/4)
+function probeNote(s) {
+  s = mod(s);
+  let base, mult, end;
+  if (s >= SD_S && s < GC_S) { base = SD_S; mult = 2; end = GC_S; }
+  else if (s >= SC_S && s < SO_S) { base = SC_S; mult = 4; end = SO_S; }
+  else return null;
+  const d = s - base;
+  if (d % mult) return null;
+  const n = d / mult, m = MOTIF[n % 32];
+  if (!m) return null;
+  let j = 1;
+  while (j < 32 && !MOTIF[(n + j) % 32]) j++;
+  return { m, steps: Math.min(j * mult, end - s) };
+}
+
+// single source of truth for what plays on step s: audio, HUD and visuals all read this
+function hit(layer, s) {
+  const { id, lb, i } = at(s), hush = hushAt(s), D = id === 'drop', Q = D && lb >= 16;
+  const st = id === 'st1' || id === 'st2' || id === 'st3';
+  switch (layer) {
+    case 'pad':   // chord number + 1 where a pad chord starts
+      if (id === 'title' || hush) return 0;
+      if (id === 'outro') return lb === 0 && i === 0 ? 1 : 0;
+      if (Q) return lb % 2 === 0 && i === 0 ? chordAt(s) + 1 : 0;
+      return i === 0 ? chordAt(s) + 1 : 0;
+    case 'bell':  // chord tone + 1
+      if (hush || !(st || id === 'build' || D || id === 'outro')) return 0;
+      if (id === 'outro') return lb < 2 && i === 0 ? 1 : 0;
+      if (id === 'st1' && lb < 2) return i === 0 ? 1 : 0;
+      if (Q) return (lb % 2 === 0 ? { 0: 1, 10: 2 } : { 4: 3 })[i] || 0;
+      return ({ 0: 1, 6: 2, 10: 3, 14: D ? 2 : 0 })[i] || 0;
+    case 'kick':
+      if (hush) return 0;
+      if (id === 'st2') return i === 0 ? 0.7 : i === 10 && lb >= 4 ? 0.45 : 0;
+      if (id === 'st3') return i === 0 ? 0.7 : i === 10 ? 0.45 : 0;
+      if (id === 'build') return lb < 2 ? (i === 0 ? 0.7 : i === 10 ? 0.45 : 0) : lb === 2 ? (i % 4 === 0 ? 0.6 : 0) : (i % 2 === 0 ? 0.35 + 0.04 * i : 0);
+      if (Q) return lb % 2 === 0 ? (i === 0 ? 1 : 0) : (i === 10 ? 0.45 : 0);
+      if (D) return i === 0 ? 1 : i === 14 && lb % 2 ? 0.4 : 0;
+      return 0;
+    case 'snare':
+      if (hush) return 0;
+      if (Q) return lb % 2 === 1 && i === 0 ? 1 : 0;
+      if (D) return i === 8 ? 1 : i === 15 && lb % 4 === 3 ? 0.3 : 0;
+      if (id === 'build' && lb === 3) return i % 2 === 1 ? 0.15 + 0.04 * i : 0;
+      return 0;
+    case 'hat':
+      if (hush) return 0;
+      if (id === 'st2') return lb < 4 ? (i % 4 === 2 ? 0.5 : 0) : (i % 2 === 0 ? HATV[i] : 0);
+      if (id === 'st3' || (id === 'build' && lb < 3) || Q) return i % 2 === 0 ? HATV[i] : 0;
+      if (D) return HATV[i];
+      return 0;
+    case 'arp':
+      if (hush) return 0;
+      if (id === 'st3') return lb < 4 && i % 2 ? 0 : arpTone(chordAt(s), ARPI[i]);
+      if (id === 'build' || (D && !Q)) return arpTone(chordAt(s), ARPI[i]);
+      if (Q) return i % 2 ? 0 : arpTone(chordAt(s), ARPI[i]);
+      return 0;
+    case 'bass':
+      if (hush) return 0;
+      if (id === 'build') return i === 0 ? 1 : 0;
+      if (Q) return lb % 2 === 0 && i === 0 ? 1 : 0;
+      if (D) return i === 0 || i === 10 ? 1 : 0;
+      return 0;
+    case 'probe': return probeNote(s) ? 1 : 0;
+    case 'tick': return ticksIn(s).length ? 1 : 0;
+    case 'crash': return i === 0 && D && lb % 8 === 0 ? 1 : 0;
+    case 'drm': return hit('kick', s) || hit('snare', s);
+    case 'perc': return hit('kick', s) || hit('snare', s) || hit('hat', s);
+    case 'beacon': return hit('tick', s) || hit('probe', s);
+  }
+  return 0;
+}
+
+// a bed note is kept only if it stays at least a fifth from the beacon for as long as it sounds,
+// so nothing in the chip bed can mask the teaching tone
+function clear(f, t0, t1) {
+  for (let j = 0; j <= 12; j++) {
+    const ts = (t0 + (t1 - t0) * j / 12) % LOOP;
+    if (!beaconOn(ts)) continue;
+    const fb = F0 * kAt(ts), r = f > fb ? f / fb : fb / f;
+    if (r < 1.5 - 1e-9) return false;
+  }
+  return true;
+}
+function holdFor(layer, s, max) {
+  let n = 1;
+  while (n < max && !hit(layer, s + n) && !hushAt(s + n)) n++;
+  return n * STEP;
+}
+// every pitched note of the chip bed on step s (and any left out for crowding the beacon)
+const PAD_TAIL = 0.7;
+function bedNotes(s) {
+  const out = [], dropped = [], { id, lb, i } = at(s), ch = CHORDS[chordAt(s)], D = id === 'drop', ts = mod(s) * STEP;
+  const add = (v, f, dur, vol, extra = {}) => (clear(f, ts, ts + dur) ? out : dropped).push({ v, f, dur, vol, ...extra });
+  if (hit('pad', s)) {
+    const dur = holdFor('pad', s, 64) + PAD_TAIL;
+    const reg = id === 'outro' ? ch.mid : D ? [ch.low[0], ...ch.mid] : id === 'build' ? [ch.low[0], ...ch.hi] : [...ch.low, ...ch.hi];
+    for (const n of reg) { const f = J(n); add('pad', f, dur, f < 300 ? 0.2 : f > 800 ? 0.06 : 0.11); }
+  }
+  const b = hit('bell', s);
+  if (b) add('bell', J(ch.hi[b - 1]), 1.8, D ? 0.07 : 0.09, { p: Math.sin(s * 1.3) * 0.5 });
+  const a = hit('arp', s);
+  if (a) add('arp', a, STEP * 0.9, id === 'st3' ? 0.1 : 0.08, { p: Math.sin(s * 0.7) * 0.4 });
+  if (hit('bass', s)) add('bass', J(ch.bass), holdFor('bass', s, 32) * 0.95, 0.5);
+  const pn = probeNote(s);
+  if (pn) { const k = kAt(ts); add('probe', J(pn.m) * k, pn.steps * STEP * 0.95, 0.13, { k }); }
+  return { notes: out, dropped };
+}
+
+// one colour per actor, kept all the way through
+const P = {
+  bg: '#04050f', grid: '#0e1330', edge: '#2a3166', dim: '#8a90c8', fg: '#eef0ff', shadow: '#000000', white: '#ffffff', black: '#000000',
+  beacon: '#5ff0ff', beaconD: '#12505a', beaconL: '#c8fbff',   // the probe: its note, its clock, its label
+  hole: '#ff9a3c', holeD: '#4a2208', holeL: '#ffd9a8',          // the glow round the hole
+  pad: '#a98bff', padD: '#35295e',
+  bell: '#ff9ad5', bellD: '#55223f',
+  drm: '#ff7a5a', drmD: '#56241a',
+  arp: '#4f7bff', arpD: '#1a2766',
+  bass: '#4dffa0', bassD: '#145a36',
+  curve: '#ffd23f', curveD: '#5e4a10',
+};
+// the probe's light as we see it: it leaves at 490 nm (cyan) and reaches us at 490 / k
+const SPEC = [[500, '#5ff0ff', 'CYAN'], [565, '#7dff7a', 'GREEN'], [590, '#ffe34a', 'YELLOW'], [625, '#ff9a3c', 'ORANGE'],
+              [700, '#ff4a3a', 'RED'], [780, '#a01c2c', 'DEEP RED'], [Infinity, '#4a1430', 'INFRARED']];
+const LAM0 = 490;
+const specOf = nm => SPEC.find(([m]) => nm < m);
+const lightCol = k => specOf(LAM0 / k)[1];
+const lightName = k => specOf(LAM0 / k)[2];
+
+// ---------- canvas + gfx helpers ----------
+const cv = document.getElementById('c');
+const cx = cv.getContext('2d');
+cx.imageSmoothingEnabled = false;
+
+// 3x5 pixel font, rows top to bottom
+const FONT = {
+  A:'010 101 111 101 101', B:'110 101 110 101 110', C:'011 100 100 100 011', D:'110 101 101 101 110',
+  E:'111 100 110 100 111', F:'111 100 110 100 100', G:'011 100 101 101 011', H:'101 101 111 101 101',
+  I:'111 010 010 010 111', J:'001 001 001 101 010', K:'101 101 110 101 101', L:'100 100 100 100 111',
+  M:'101 111 111 101 101', N:'110 101 101 101 101', O:'010 101 101 101 010', P:'110 101 110 100 100',
+  Q:'010 101 101 111 011', R:'110 101 110 101 101', S:'011 100 010 001 110', T:'111 010 010 010 010',
+  U:'101 101 101 101 111', V:'101 101 101 101 010', W:'101 101 111 111 101', X:'101 101 010 101 101',
+  Y:'101 101 010 010 010', Z:'111 001 010 100 111',
+  0:'111 101 101 101 111', 1:'010 110 010 010 111', 2:'110 001 010 100 111', 3:'110 001 010 001 110',
+  4:'101 101 111 001 001', 5:'111 100 110 001 110', 6:'011 100 111 101 111', 7:'111 001 010 010 010',
+  8:'111 101 111 101 111', 9:'111 101 111 001 110',
+  '-':'000 000 111 000 000', '.':'000 000 000 000 010', ':':'000 010 000 010 000',
+  '=':'000 111 000 111 000', '+':'000 010 111 010 000', '!':'010 010 010 000 010', '?':'110 001 010 000 010',
+  '>':'100 010 001 010 100', '<':'001 010 100 010 001', '/':'001 001 010 100 100', ',':'000 000 000 010 100',
+  '(':'010 100 100 100 010', ')':'010 001 001 001 010', "'":'010 010 000 000 000', '~':'000 011 110 000 000',
+  '^':'010 101 000 000 000', '#':'101 111 101 111 101', '%':'101 001 010 100 101', '*':'010 111 010 101 000',
+};
+const GL = {};
+for (const k in FONT) GL[k] = FONT[k].replace(/ /g, '');
+
+const textW = (s, sc) => s.length * 4 * sc - sc;
+function text(s, x, y, col, sc = 1, align = 'l') {
+  s = String(s).toUpperCase();
+  if (align === 'c') x = Math.round(x - textW(s, sc) / 2);
+  else if (align === 'r') x -= textW(s, sc);
+  cx.fillStyle = col;
+  for (let i = 0; i < s.length; i++) {
+    const g = GL[s[i]];
+    if (!g) continue;
+    for (let k = 0; k < 15; k++) {
+      if (g[k] === '1') cx.fillRect(x + i * 4 * sc + (k % 3) * sc, y + ((k / 3) | 0) * sc, sc, sc);
+    }
+  }
+}
+
+// bordered caption box; lines = [{t, c, s}]
+function card(lines, y, cxp = 90, border = P.fg) {
+  let w = 0, h = 4;
+  for (const l of lines) { const s = l.s || 1; w = Math.max(w, textW(String(l.t), s)); h += 5 * s + 3; }
+  w += 10;
+  if (w > W) console.warn('card too wide:', lines.map(l => l.t).join(' / '));
+  const x = Math.round(cxp - w / 2);
+  cx.fillStyle = P.shadow; cx.fillRect(x + 2, y + 2, w, h);
+  cx.fillStyle = P.bg;     cx.fillRect(x, y, w, h);
+  cx.fillStyle = border;
+  cx.fillRect(x, y, w, 1); cx.fillRect(x, y + h - 1, w, 1);
+  cx.fillRect(x, y, 1, h); cx.fillRect(x + w - 1, y, 1, h);
+  let ty = y + 4;
+  for (const l of lines) { const s = l.s || 1; text(l.t, cxp, ty, l.c || P.fg, s, 'c'); ty += 5 * s + 3; }
+  return h;
+}
+
+const BAYER = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
+const bay = (x, y) => BAYER[(y & 3) * 4 + (x & 3)];
+
+function fillCircle(x, y, r, col) {
+  if (r < 0) return;
+  cx.fillStyle = col;
+  for (let dy = -r; dy <= r; dy++) {
+    const dx = Math.floor(Math.sqrt((r + .5) * (r + .5) - dy * dy));
+    cx.fillRect(x - dx, y + dy, 2 * dx + 1, 1);
+  }
+}
+
+// ordered-dither ring/disc, d = 0..1 density
+function ditherCircle(x, y, r0, r1, col, d) {
+  if (d <= 0) return;
+  x = Math.round(x); y = Math.round(y); r1 = Math.round(r1);
+  cx.fillStyle = col;
+  const lvl = d * 16;
+  for (let py = Math.max(0, y - r1); py <= Math.min(H - 1, y + r1); py++) {
+    for (let px = Math.max(0, x - r1); px <= Math.min(W - 1, x + r1); px++) {
+      const dd = (px - x) ** 2 + (py - y) ** 2;
+      if (dd <= r1 * r1 && dd >= r0 * r0 && bay(px, py) < lvl) cx.fillRect(px, py, 1, 1);
+    }
+  }
+}
+
+// thin dithered ring, sampled by angle; only the arc between a0 and a1 (radians)
+function ring(x, y, r, col, th, d, a0 = 0, a1 = 2 * Math.PI) {
+  if (d <= 0 || r < 1) return;
+  cx.fillStyle = col;
+  const lvl = d * 16, n = Math.ceil(r * 7 * (a1 - a0) / 6.283) + 8;
+  for (let k = 0; k < n; k++) {
+    const a = a0 + k / n * (a1 - a0), c = Math.cos(a), s = Math.sin(a);
+    for (let j = 0; j < th; j++) {
+      const px = Math.round(x + c * (r + j)), py = Math.round(y + s * (r + j));
+      if (px >= 0 && px < W && py >= 0 && py < H && bay(px, py) < lvl) cx.fillRect(px, py, 1, 1);
+    }
+  }
+}
+
+function line(x0, y0, x1, y1, col, d = 1) {
+  cx.fillStyle = col;
+  const n = Math.max(Math.abs(x1 - x0), Math.abs(y1 - y0), 1);
+  for (let k = 0; k <= n; k++) {
+    const px = Math.round(x0 + (x1 - x0) * k / n), py = Math.round(y0 + (y1 - y0) * k / n);
+    if (d >= 1 || bay(px, py) < d * 16) cx.fillRect(px, py, 1, 1);
+  }
+}
+
+function dot(px, py, col, d) {
+  px = Math.round(px); py = Math.round(py);
+  if (px < 0 || px >= W || py < 0 || py >= H) return;
+  if (bay(px, py) < d * 16) { cx.fillStyle = col; cx.fillRect(px, py, 1, 1); }
+}
+
+// dithered pattern fills: d of a 4x4 tile in col (cached)
+const PAT = {};
+function ditherFill(col, d) {
+  const n = Math.max(0, Math.min(16, Math.round(d * 16)));
+  if (!n) return;
+  const key = col + n;
+  if (!PAT[key]) {
+    const t = document.createElement('canvas'); t.width = t.height = 4;
+    const c = t.getContext('2d'); c.fillStyle = col;
+    for (let i = 0; i < 16; i++) if (BAYER[i] < n) c.fillRect(i % 4, (i / 4) | 0, 1, 1);
+    PAT[key] = cx.createPattern(t, 'repeat');
+  }
+  cx.fillStyle = PAT[key]; cx.fillRect(0, 0, W, H);
+}
+
+function mulberry(a) { return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+const rng = mulberry(1915);
+
+// background stars, bent outward round a hole: lens = [[x, y, strength px^2, shadow px], ...]
+const STARS = Array.from({ length: 140 }, () => ({ x: rng() * W, y: rng() * H, b: rng() }));
+function stars(t, lens = []) {
+  STARS.forEach((s, k) => {
+    let x = s.x, y = s.y;
+    for (const [hx, hy, e2, rh] of lens) {
+      const dx = x - hx, dy = y - hy, d2 = dx * dx + dy * dy;
+      if (d2 < (rh + 1) ** 2) return;
+      x += dx * e2 / d2; y += dy * e2 / d2;
+    }
+    cx.fillStyle = (k * 7 + Math.floor(t * 2)) % 13 === 0 ? P.fg : s.b > 0.6 ? P.dim : P.edge;
+    cx.fillRect(Math.round(x), Math.round(y), 1, 1);
+  });
+}
+
+// ---------- text helpers ----------
+function fmtNum(v) { return v >= 10 ? String(Math.round(v)) : v >= 1 ? String(Math.round(v * 10) / 10) : String(parseFloat(v.toPrecision(2))); }
+function fmtBig(v) {
+  if (v >= 1e12) return fmtNum(v / 1e12) + ' TRILLION';
+  if (v >= 1e9) return fmtNum(v / 1e9) + ' BILLION';
+  if (v >= 1e6) return fmtNum(v / 1e6) + ' MILLION';
+  if (v >= 1e3) return Math.round(v).toLocaleString('en-US');
+  return fmtNum(v);
+}
+const rough = v => { const e = Math.pow(10, Math.floor(Math.log10(v)) - 1); return fmtBig(Math.round(v / e) * e); }; // 2 significant figures
+const fmtHz = f => f >= 100 ? String(Math.round(f)) : f >= 10 ? f.toFixed(1) : f.toFixed(2);
+const fmtR = r => r < 1.01 ? r.toFixed(4) : r.toFixed(2);
+const fmtS = s => s >= 1 ? `${fmtNum(s)} S` : s >= 1e-3 ? `${fmtNum(s * 1e3)} MS` : `${fmtNum(s * 1e6)} MICROSEC`;
+const fracOf = k => (STOPS.find(st => Math.abs(st.k - k) < 1e-6) || { frac: k.toFixed(2) }).frac;
+const stopLine = st => `AT ${fmtR(st.r)} RS: ${fmtHz(st.f)} HZ (${letterOf(st.f)})`;
+const banner = (title, sub, col, subCol = P.fg) => card([{ t: title, s: 2, c: col }, { t: sub, c: subCol }], 4, 90, col);
+const fact = (lines, border) => card(lines.map(l => typeof l === 'string' ? { t: l } : l), 200, 90, border);
+const timeline = s => { const w = textW(s.toUpperCase(), 1); cx.fillStyle = P.bg; cx.fillRect(88 - Math.round(w / 2), 242, w + 4, 9); text(s, 90, 244, P.dim, 1, 'c'); };
+
+// ---------- audio (everything synthesised) ----------
+let ac = null, master, secGain, comp, duck, kickIn, bassIn, padIn, bellIn, arpIn, probeIn, percIn, fxSend, spaceSend, pureIn;
+let sq125, sq25, sq50, noiseBuf, T0 = 0, muted = false, step = 0;
+
+// every node made while one step is being scheduled; all are disconnected once that step's last sound ends
+// (Chrome tidies finished notes up by itself, Safari keeps processing them and slows to a crawl)
+let bag = null;
+const track = n => { if (bag) bag.push(n); return n; };
+const G = v => { const g = track(ac.createGain()); g.gain.value = v; return g; };
+const F = (type, f, Q = 0.7) => { const b = track(ac.createBiquadFilter()); b.type = type; b.frequency.value = f; b.Q.value = Q; return b; };
+const chain = (...n) => { for (let i = 0; i < n.length - 1; i++) n[i].connect(n[i + 1]); return n[0]; };
+const pan = v => { const p = track(ac.createStereoPanner()); p.pan.value = v; return p; };
+
+function pulseWave(d) {
+  const N = 64, re = new Float32Array(N), im = new Float32Array(N);
+  for (let n = 1; n < N; n++) {
+    const a = 2 / (n * Math.PI);
+    re[n] = a * Math.sin(n * Math.PI * d) * Math.cos(n * Math.PI * d);
+    im[n] = a * Math.sin(n * Math.PI * d) ** 2;
+  }
+  return ac.createPeriodicWave(re, im);
+}
+
+function osc(wave, f, t) {
+  const o = track(ac.createOscillator());
+  if (typeof wave === 'string') o.type = wave; else o.setPeriodicWave(wave);
+  o.frequency.setValueAtTime(f, t);
+  return o;
+}
+function env(g, t, vol, atk, dur, hold) {
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.linearRampToValueAtTime(vol, t + atk);
+  if (hold) { g.gain.setValueAtTime(vol, t + dur * hold); }
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+}
+function play(o, t, dur) { o.start(t); o.stop(t + dur + 0.03); }
+
+function buildGraph() {
+  master = G(0.0001);
+  master.connect(ac.destination);
+  comp = ac.createDynamicsCompressor();
+  comp.threshold.value = -16; comp.knee.value = 8; comp.ratio.value = 3; comp.attack.value = 0.005; comp.release.value = 0.25;
+  secGain = G(0.8); // section level: the drop gets the headroom
+  chain(comp, secGain, master);
+  // the teaching signal skips the compressor and every effect: a pure sine straight to the master
+  pureIn = G(1); pureIn.connect(master);
+  // sidechain bus: pad, bells, bass, arp and the probe's song breathe with the kick
+  duck = G(1); duck.connect(comp);
+  // ping-pong echo, dotted eighth, each side darker than the last
+  const dl = ac.createDelay(1), dr = ac.createDelay(1);
+  dl.delayTime.value = dr.delayTime.value = STEP * 3;
+  const fbl = G(0.45), fbr = G(0.45), lpl = F('lowpass', 3000), lpr = F('lowpass', 2400);
+  fxSend = G(1);
+  const merge = ac.createChannelMerger(2);
+  chain(fxSend, dl, lpl, fbl, dr, lpr, fbr, dl);
+  lpl.connect(merge, 0, 0); lpr.connect(merge, 0, 1);
+  chain(merge, G(0.5), comp);
+  // the space: a long dark feedback delay, a beat and a half, for the ambient wash
+  spaceSend = G(1);
+  const sd = ac.createDelay(3), slp = F('lowpass', 1400), sfb = G(0.55);
+  sd.delayTime.value = BEAT * 1.5;
+  chain(spaceSend, sd, slp, sfb, sd);
+  chain(slp, G(0.45), comp);
+  kickIn = G(1);
+  chain(kickIn, F('lowpass', 2200), G(0.9), comp);
+  bassIn = G(1);
+  chain(bassIn, G(0.55), duck);
+  padIn = G(1);
+  chain(padIn, G(0.6), duck);
+  padIn.connect(G(0.3)).connect(fxSend); padIn.connect(G(0.35)).connect(spaceSend);
+  bellIn = G(1);
+  chain(bellIn, G(0.5), duck);
+  bellIn.connect(G(0.5)).connect(fxSend); bellIn.connect(G(0.3)).connect(spaceSend);
+  arpIn = G(1);
+  chain(arpIn, G(0.35), duck);
+  arpIn.connect(G(0.45)).connect(fxSend);
+  probeIn = G(1);
+  chain(probeIn, G(0.6), duck);
+  probeIn.connect(G(0.4)).connect(fxSend); probeIn.connect(G(0.3)).connect(spaceSend);
+  percIn = G(0.8); percIn.connect(comp);
+  sq125 = pulseWave(0.125); sq25 = pulseWave(0.25); sq50 = pulseWave(0.5);
+  noiseBuf = ac.createBuffer(1, ac.sampleRate, ac.sampleRate);
+  const d = noiseBuf.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+}
+
+function noise(t, dur, vol, type, f, dest, Q = 0.8) {
+  const s = track(ac.createBufferSource()); s.buffer = noiseBuf;
+  const b = F(type, f, Q), g = G(1);
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  chain(s, b, g, dest);
+  s.start(t, Math.random() * 0.5); s.stop(t + dur + 0.03);
+}
+
+// the teaching signal: one sine at F0 k for the whole descent, from song time ts0 (ctx time t) to the loop's end.
+// Holds are set, glides are exponential ramps: even in pitch, exactly the k(t) the pictures and ticks use.
+const toneVol = k => 0.14 * k ** -0.3;      // a little louder as it falls, where ears are less sensitive
+function beaconTone(t, ts0) {
+  const o = osc('sine', F0 * kAt(ts0), t), g = G(0), base = t - ts0;
+  chain(o, g, pureIn);
+  g.gain.setValueAtTime(0, t);
+  g.gain.linearRampToValueAtTime(toneVol(kAt(ts0 + BEAT)), t + BEAT);
+  for (let j = 1; j < KEYS.length; j++) {
+    const tb = KEYS[j][0] * BEAT;
+    if (tb <= ts0 + BEAT) continue;
+    const k0 = KEYS[j - 1][1], k1 = KEYS[j][1];
+    if (k1 === k0) o.frequency.setValueAtTime(F0 * k1, base + tb);
+    else o.frequency.exponentialRampToValueAtTime(F0 * k1, base + tb);
+    g.gain.linearRampToValueAtTime(j === KEYS.length - 1 ? 0 : toneVol(k1), base + tb);
+  }
+  play(o, t, LOOP - ts0 - 0.05);
+}
+// a tick: a short sine pip an octave above its note, and as dilated as the note: lower and longer
+function pip(t, k) {
+  const o = osc('sine', 2 * F0 * k, t), g = G(1), dur = 0.07 / k;
+  env(g, t, 0.1, 0.003 / k, dur);
+  chain(o, g, pureIn); play(o, t, dur);
+}
+
+// layer 1: two detuned 50% pulses per note, slow swell, into the echo and the space
+function padVoice(t, n) {
+  const lo = n.f < 300, lp = F('lowpass', lo ? 500 : 1400, 0.8), g = G(1);
+  lp.frequency.setValueAtTime(lo ? 380 : 1000, t); lp.frequency.linearRampToValueAtTime(lo ? 900 : 2600, t + n.dur * 0.6);
+  env(g, t, n.vol, Math.min(1.2, n.dur * 0.3), n.dur, (n.dur - PAD_TAIL) / n.dur);
+  chain(lp, g, padIn);
+  for (const [det, p] of [[-7, -0.4], [7, 0.4]]) { const o = osc(sq50, n.f, t); o.detune.value = det; chain(o, G(0.5), pan(p), lp); play(o, t, n.dur); }
+}
+// layer 2: a 12.5% pulse bell with a sine an octave up, ringing into the echo
+function bellVoice(t, n) {
+  const g = G(1), lp = F('lowpass', 5000, 1);
+  g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(n.vol, t + 0.004); g.gain.exponentialRampToValueAtTime(0.0001, t + n.dur);
+  chain(lp, g, pan(n.p), bellIn);
+  const a = osc(sq125, n.f, t); chain(a, G(0.6), lp); play(a, t, n.dur);
+  const b = osc('sine', n.f * 2, t); chain(b, G(0.5), lp); play(b, t, n.dur);
+}
+// layer 4: a 25% pulse pluck, Berlin-school style, into the ping-pong echo
+function arpVoice(t, n) {
+  const lp = F('lowpass', 4000, 3), g = G(1);
+  lp.frequency.setValueAtTime(4500, t); lp.frequency.exponentialRampToValueAtTime(900, t + n.dur);
+  env(g, t, n.vol, 0.003, n.dur, 0.1);
+  chain(lp, g, pan(n.p), arpIn);
+  const o = osc(sq25, n.f, t); chain(o, lp); play(o, t, n.dur);
+}
+// layer 5: a plain triangle sub
+function bassVoice(t, n) {
+  const g = G(1); env(g, t, n.vol, 0.06, n.dur, 0.8);
+  const o = osc('triangle', n.f, t); chain(o, g, bassIn); play(o, t, n.dur);
+}
+// the probe's song: a 25% pulse with vibrato. Its vibrato and its attack are slowed by k too
+function probeVoice(t, n) {
+  const g = G(1), lp = F('lowpass', 3000, 1);
+  env(g, t, n.vol, 0.01 / n.k, n.dur, 0.5);
+  const o = osc(sq25, n.f, t), l = osc('sine', 5 * n.k, t), lg = G(n.f * 0.006);
+  chain(l, lg, o.frequency);
+  chain(o, lp, g, probeIn); play(o, t, n.dur); play(l, t, n.dur);
+}
+const VOICE = { pad: padVoice, bell: bellVoice, arp: arpVoice, bass: bassVoice, probe: probeVoice };
+
+// layer 3: soft drums. A round sine kick that lets the bed breathe, a brushed snare, noise hats
+function kick(t, vel) {
+  const o = osc('sine', 130, t);
+  o.frequency.exponentialRampToValueAtTime(48, t + 0.12);
+  const g = G(1); env(g, t, vel * 0.8, 0.002, 0.45, 0.2);
+  chain(o, g, kickIn); play(o, t, 0.45);
+  duck.gain.setValueAtTime(0.65, t);
+  duck.gain.setTargetAtTime(1, t + 0.04, 0.15);
+}
+function snare(t, vel) {
+  const o = osc('triangle', 240, t), g = G(1);
+  o.frequency.exponentialRampToValueAtTime(150, t + 0.08);
+  env(g, t, vel * 0.35, 0.001, 0.16);
+  chain(o, g, percIn); play(o, t, 0.16);
+  noise(t, 0.12 + 0.2 * vel, 0.35 * vel, 'bandpass', 2400, percIn, 0.7);
+  if (vel >= 1) noise(t, 0.6, 0.12, 'highpass', 1800, spaceSend);
+}
+function hat(t, vel, p) {
+  const pn = pan(p); pn.connect(percIn);
+  noise(t, 0.03 + 0.05 * vel, 0.05 + 0.14 * vel, 'highpass', 7000, pn);
+}
+// a deep soft boom where the drop's parts begin
+function impact(t) {
+  const o = osc('sine', 80, t), g = G(1);
+  o.frequency.exponentialRampToValueAtTime(32, t + 1.8);
+  env(g, t, 0.5, 0.01, 2, 0.15);
+  chain(o, g, kickIn); play(o, t, 2);
+}
+// a slow swell of filtered noise: solar wind, more or less
+function wash(t, dur, vol) {
+  const s = track(ac.createBufferSource()); s.buffer = noiseBuf; s.loop = true;
+  const lp = F('lowpass', 300, 2), g = G(1);
+  lp.frequency.setValueAtTime(300, t); lp.frequency.exponentialRampToValueAtTime(3000, t + dur * 0.5); lp.frequency.exponentialRampToValueAtTime(250, t + dur);
+  g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(vol, t + dur * 0.5); g.gain.linearRampToValueAtTime(0.0001, t + dur);
+  chain(s, lp, g, percIn); g.connect(spaceSend);
+  s.start(t); s.stop(t + dur + 0.02);
+}
+function riser(t, dur, vol) {
+  const s = track(ac.createBufferSource()); s.buffer = noiseBuf; s.loop = true;
+  const bp = F('bandpass', 400, 3), g = G(1);
+  bp.frequency.setValueAtTime(400, t); bp.frequency.exponentialRampToValueAtTime(6000, t + dur);
+  g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(vol, t + dur - 0.01); g.gain.linearRampToValueAtTime(0.0001, t + dur);
+  chain(s, bp, g, percIn); g.connect(spaceSend); s.start(t); s.stop(t + dur + 0.02);
+}
+// scene change: two soft falling square blips into the echo
+function chime(t) {
+  for (const [f, d] of [[J('E6') * 2, 0], [J('A5') * 2, 0.09]]) {
+    const o = osc(sq25, f, t + d), g = G(1); env(g, t + d, 0.035, 0.002, 0.25);
+    chain(o, g, percIn); g.connect(fxSend); play(o, t + d, 0.25);
+  }
+}
+// the tether snapping: a click and a falling blip
+function snap(t) {
+  noise(t, 0.05, 0.4, 'highpass', 3000, percIn);
+  const o = osc(sq25, 1400, t), g = G(1);
+  o.frequency.exponentialRampToValueAtTime(180, t + 0.4);
+  env(g, t, 0.06, 0.002, 0.4); chain(o, g, percIn); g.connect(fxSend); play(o, t, 0.4);
+}
+
+function playStep(s, t) {
+  bag = [];
+  voices(s, t);
+  const nodes = bag, srcs = nodes.filter(n => typeof n.stop === 'function');
+  bag = null;
+  let left = srcs.length;
+  for (const n of srcs) n.onended = () => { if (--left === 0) for (const m of nodes) m.disconnect(); };
+}
+
+function voices(s, t) {
+  const { id, lb, i } = at(s), D = id === 'drop', ts = mod(s) * STEP;
+  if (i === 0) secGain.gain.setValueAtTime(D ? 1 : 0.8, t);
+  if (i === 0 && lb === 0 && ['st1', 'st2', 'st3', 'build'].includes(id)) chime(t);
+  if (id === 'title' && lb === 0 && i === 0) wash(t, BAR * 2.5, 0.35);
+  if (SHORT && s === 0) { impact(t); wash(t, BAR, 0.4); for (const n of CHORDS[0].mid) padVoice(t, { f: J(n), dur: BAR * 2 + PAD_TAIL, vol: 0.12 }); } // the Short can't open on a quiet swell
+  if (id === 'build' && lb === 0 && i === 0) riser(t, 4 * BAR - BEAT, 0.35);   // it stops where the silent beat begins
+  if (D && lb === 15 && i === 0) riser(t, 3 * BEAT, 0.25);
+  if (hit('crash', s)) { impact(t); wash(t, BAR * 2, 0.3); }
+  if (id === 'outro' && lb === 0 && i === 0) { snap(t); wash(t, BAR * 4, 0.25); }
+  if (mod(s) === S1_S) beaconTone(t, ts);
+  for (const tk of ticksIn(s)) pip(t + tk - ts, kAt(tk));
+  for (const n of bedNotes(s).notes) VOICE[n.v](t, n);
+  const k = hit('kick', s); if (k) kick(t, k);
+  const sn = hit('snare', s); if (sn) snare(t, sn);
+  const hv = hit('hat', s); if (hv) hat(t + (i % 2 ? STEP * 0.12 : 0), hv, i % 4 < 2 ? -0.3 : 0.3);
+}
+
+function schedule() {
+  if (ac.state !== 'running') return;
+  const now = ac.currentTime;
+  while (T0 + step * STEP < now + 0.15) {
+    const t = T0 + step * STEP;
+    if (t > now - 0.02) playStep(step, t); // skip steps missed while the tab was throttled
+    step++;
+  }
+}
+
+function startAudio() {
+  ac = new (window.AudioContext || window.webkitAudioContext)();
+  buildGraph();
+  T0 = ac.currentTime + 0.2; step = 0;
+  setInterval(schedule, 25); schedule();
+  master.gain.setTargetAtTime(muted ? 0.0001 : 0.9, ac.currentTime, 0.2);
+  ac.resume();
+}
+
+// offline render for checking levels without ears: __render(fromBar, bars, only) -> per-bar peak/rms.
+// only = 'pure' renders just the beacon, 'bed' everything else
+window.__render = async (bar0, bars, only, sr = 22050) => {
+  ac = new OfflineAudioContext(2, Math.ceil((bars * BAR + 1) * sr), sr);
+  buildGraph(); master.gain.value = 0.9;
+  if (only === 'pure') secGain.disconnect();
+  if (only === 'bed') pureIn.disconnect();
+  const ts0 = bar0 * BAR;
+  if (ts0 > S1 * BEAT) { bag = null; beaconTone(0.05, ts0); }
+  for (let s = bar0 * 16; s < (bar0 + bars) * 16; s++) playStep(s, 0.05 + (s - bar0 * 16) * STEP);
+  const buf = await ac.startRendering();
+  ac = null;
+  const L = buf.getChannelData(0), out = [];
+  for (let b = 0; b < bars; b++) {
+    let pk = 0, sum = 0, n = 0;
+    for (let i = Math.floor((0.05 + b * BAR) * sr); i < Math.floor((0.05 + (b + 1) * BAR) * sr); i++) { const v = Math.abs(L[i]); pk = Math.max(pk, v); sum += v * v; n++; }
+    const s = SONG[BAR_SEC[bar0 + b]];
+    out.push({ bar: bar0 + b, sec: s.id, lb: bar0 + b - s.start, peak: +pk.toFixed(3), rms: +Math.sqrt(sum / n).toFixed(3) });
+  }
+  return out;
+};
+window.__song = () => SONG.map(s => ({ id: s.id, start: s.start * BAR, bars: s.bars }));
+window.__phys = () => ({
+  F0, MASS, RS_km: RS / 1000, OCT_S, LOOP, G_3, G_B, G_C,
+  stops: STOPS.map(st => ({ k: st.k, r: st.r, rateBack: rateAt(st.r), f: st.f, note: noteOf(st.f), hoverG: st.r < Infinity ? hoverG(st.r) : 0 })),
+  probeBeatsToDrop: (tauAt(SD * BEAT) - tauAt(S1 * BEAT)) / BEAT,
+  probeBeatsToQuarter: (tauAt((SD + 64) * BEAT) - tauAt(SD * BEAT)) / BEAT,
+  ticks: TICKS.length,
+  // in the held parts of the drop the ticks should sit exactly on our grid: every 2 beats, then every 4
+  tickGridError: TICKS.filter(tk => (tk >= SD * BEAT && tk < (SD + 64 - G_C) * BEAT) || (tk >= (SD + 64) * BEAT && tk < SO * BEAT))
+    .reduce((m, tk) => { const g = tk < (SD + 64) * BEAT ? 2 * BEAT : BAR, e = Math.abs(tk / g - Math.round(tk / g)) * g; return Math.max(m, e); }, 0),
+  kAtStops: [S1 + 4, S1 + 24, S2 + 24, S3 + 24, SD + 16, SD + 80].map(b => kAt(b * BEAT)),
+});
+// the chip bed, scanned: how many notes per voice, how many were held back for crowding the beacon
+window.__bedScan = () => {
+  const kept = {}, dropped = {}, ex = [];
+  for (let s = 0; s < TOTAL_STEPS; s++) {
+    const r = bedNotes(s);
+    for (const n of r.notes) kept[n.v] = (kept[n.v] || 0) + 1;
+    for (const n of r.dropped) { dropped[n.v] = (dropped[n.v] || 0) + 1; if (ex.length < 12) ex.push(`${at(s).id}:${at(s).lb} ${n.v} ${n.f.toFixed(1)}`); }
+  }
+  return { kept, dropped, ex };
+};
+window.__hit = hit; window.__TOTAL = TOTAL_STEPS; window.__ticks = TICKS; window.__kAt = kAt;
+
+function toggle() {
+  if (!ac) { startAudio(); return; }
+  if (ac.state === 'running') ac.suspend(); else ac.resume();
+}
+function toggleMute() {
+  muted = !muted;
+  if (ac) master.gain.setTargetAtTime(muted ? 0.0001 : 0.9, ac.currentTime, 0.1);
+}
+cv.addEventListener('click', toggle);
+addEventListener('keydown', e => {
+  if (e.code === 'Space') { e.preventDefault(); toggle(); }
+  else if (e.key === 'm' || e.key === 'M') toggleMute();
+});
+
+// ---------- visual envelopes, read from the same hit() table ----------
+function since(layer, t, back = 64) {
+  const s = Math.floor(t / STEP);
+  for (let k = 0; k < back; k++) if (hit(layer, s - k)) return t - (s - k) * STEP;
+  return 99;
+}
+const pulse = (layer, t, rate = 10) => Math.exp(-since(layer, t) * rate);
+const lb = lt => Math.floor(lt / BAR);
+const smooth = x => x * x * (3 - 2 * x);
+// the probe's flash on each tick: it fades on its own clock, so deeper down it lingers
+function tickGlow(ts, k) {
+  const tk = lastTick(ts);
+  return tk === null ? 0 : Math.exp(-(ts - tk) * 7 * k);
+}
+
+// ---------- the actors ----------
+// a black hole as you'd see it: its shadow, a thin bright ring, brighter on the side swinging toward us
+function shadow(x, y, R, e = 0) {
+  ditherCircle(x, y, R, Math.round(R * 1.7), P.holeD, 0.45 + 0.2 * e);
+  ditherCircle(x, y, R, R + 3, P.hole, 0.5 + 0.3 * e);
+  ring(x, y, R, P.holeL, 1, 0.9, 0.2, Math.PI - 0.2);
+  fillCircle(x, y, R - 1, P.black);
+}
+// the side view: the hole at the bottom, our station far above, the probe on its tether between.
+// Radii are true to 6 RS and squeezed beyond, so the station fits
+const HTOP = 164;
+const rv = r => r <= 6 ? r : 6 + 4 * (1 - Math.exp(-(r - 6) / 4));
+const rvInv = x => x <= 6 ? x : x >= 10 ? Infinity : 6 - 4 * Math.log(1 - (x - 6) / 4);
+function station(x, y, t) {
+  cx.fillStyle = P.edge; cx.fillRect(x - 10, y + 1, 21, 2);
+  cx.fillStyle = P.dim; cx.fillRect(x - 3, y - 1, 7, 5);
+  cx.fillStyle = (t % BEAT) < 0.12 ? P.white : P.fg; cx.fillRect(x - 10, y + 1, 1, 1); cx.fillRect(x + 10, y + 1, 1, 1);
+}
+function probe(x, y, k, ts, fade = 1) {
+  const e = beaconOn(ts) ? tickGlow(ts, k) * fade : 0, col = lightCol(k);
+  ditherCircle(x, y, 0, 4 + Math.round(5 * e), col, (beaconOn(ts) ? 0.15 + 0.5 * e : 0) * fade);
+  cx.fillStyle = fade > 0.4 ? P.dim : P.edge; cx.fillRect(x - 2, y - 2, 5, 5);
+  cx.fillStyle = e > 0.5 ? P.white : beaconOn(ts) && fade > 0.15 ? col : P.edge; cx.fillRect(x - 1, y - 1, 3, 3);
+  cx.fillStyle = P.dim; cx.fillRect(x, y - 4, 1, 2);
+}
+function side(t, o = {}) {
+  const rp = o.rp || 12, hy = HTOP + rp, k = kAt(t), r = rOfK(k);
+  stars(t);
+  ditherCircle(90, hy, rp + 1, rp + Math.round(Math.min(rp * 1.2, 18)), P.holeD, 0.35);
+  ring(90, hy, rp + 1, P.hole, 1, 0.55);
+  if (o.ps) {
+    ring(90, hy, Math.round(1.5 * rp), P.edge, 1, 0.7);
+    // light caught on the photon sphere, going round (slowed)
+    for (let j = 0; j < 3; j++) for (let tr = 0; tr < 6; tr++) {
+      const a = t * 0.7 + j * 2.094 - tr * 0.06;
+      dot(90 + Math.cos(a) * 1.5 * rp, hy + Math.sin(a) * 1.5 * rp, tr ? P.holeL : P.white, 1 - tr / 6);
+    }
+  }
+  fillCircle(90, hy, rp, P.black);
+  const sy = hy - Math.round(10.5 * rp), py = Math.round(hy - rp * rv(r)), px = 90;
+  if (sy > -10) station(90, sy, t);
+  if (!o.cut) line(90, Math.max(sy + 3, 0), 90, py - 5, P.edge);
+  probe(px, py, k, t, o.fade ?? 1);
+  return { px, py, k, r, hy, rp, sy };
+}
+// a clock face: hand at `turns` revolutions, one revolution = one bar, the 4 marks = beats
+function clock(x, y, r, turns, col, lab) {
+  fillCircle(x, y, r, P.bg);
+  ring(x, y, r, col, 1, 1);
+  for (let q4 = 0; q4 < 4; q4++) { const a = q4 * Math.PI / 2; dot(x + Math.cos(a) * (r - 2), y + Math.sin(a) * (r - 2), col, 1); }
+  const a = turns * 2 * Math.PI - Math.PI / 2;
+  line(x, y, Math.round(x + Math.cos(a) * (r - 2)), Math.round(y + Math.sin(a) * (r - 2)), P.white);
+  if (lab) text(lab, x, y + r + 3, col, 1, 'c');
+}
+// what the probe is singing and where it is, next to it
+function probeLabels(v, t, withClock = true) {
+  if (beaconOn(t)) text(`${fmtHz(F0 * v.k)} HZ`, v.px - 8, v.py - 7, P.beacon, 1, 'r');
+  text(v.r === Infinity ? 'AT STATION' : `R=${fmtR(v.r)} RS`, v.px - 8, v.py, P.dim, 1, 'r');
+  if (withClock) clock(v.px + 16, v.py, 6, tauAt(t) / BAR, P.beacon, 'PROBE');
+}
+// the tick tape: our beats on top, the probe's ticks below, the last two bars scrolling left
+function tape(ts, y) {
+  const x0 = 26, x1 = 172, span = 2 * BAR, xOf = s => Math.round(x1 - (ts - s) / span * (x1 - x0));
+  text('US', 4, y, P.fg); text('PROBE', 4, y + 8, P.beacon);
+  line(x0, y + 2, x1, y + 2, P.grid); line(x0, y + 10, x1, y + 10, P.grid);
+  for (let n = Math.ceil((ts - span) / BEAT); n * BEAT <= ts; n++) {
+    cx.fillStyle = ts - n * BEAT < 0.12 ? P.white : P.fg; cx.fillRect(xOf(n * BEAT), y, 1, 5);
+  }
+  for (const tk of TICKS) if (tk <= ts && tk >= ts - span) { cx.fillStyle = ts - tk < 0.12 ? P.white : P.beacon; cx.fillRect(xOf(tk), y + 8, 1, 5); }
+  cx.fillStyle = P.dim; cx.fillRect(x1 + 2, y - 1, 1, 15);
+}
+// the probe's light climbing out (slowed): crests a local wavelength apart. A watcher hovering at r'
+// sees it at 490 k(r')/k nm, so the crests spread and redden as they climb
+function climbWaves(v, t) {
+  const lam0 = 9, shift = (t * 0.5) % 1;
+  let ph = 0, last = 0;
+  for (let y = v.py - 4; y > Math.max(v.sy + 6, 36); y--) {
+    const r2 = rvInv((v.hy - y) / v.rp), z = rateAt(r2) / v.k;
+    ph += 1 / (lam0 * z);
+    const n = Math.floor(ph - shift);
+    if (n !== last) {
+      last = n;
+      const d = v.py - y;
+      ring(v.px, v.py, d, specOf(LAM0 * z)[1], 1, 0.85 * (1 - d / 160), -Math.PI * 0.75, -Math.PI * 0.25);
+    }
+  }
+}
+// the probe's song leaving it as little sparks, drifting up slowly
+function notesUp(v, t, s) {
+  for (let k = 0; k < 64; k++) {
+    if (!hit('probe', s - k)) continue;
+    const age = t - (s - k) * STEP;
+    if (age > 4 || age < 0) continue;
+    const y = v.py - 8 - age * 12, x = v.px + Math.sin(age * 1.7 + (s - k)) * 7;
+    dot(x, y, P.beaconL, 1 - age / 4); dot(x + 1, y, P.beaconL, 1 - age / 4); dot(x, y + 1, P.beacon, 0.8 - age / 5);
+  }
+}
+function bigClocks(t, k) {
+  clock(40, 100, 16, tauAt(t) / BAR, P.beacon, 'PROBE');
+  clock(140, 100, 16, t / BAR, P.fg, 'US');
+  text(`${fracOf(k)} SPEED`, 40, 77, P.beacon, 1, 'c');
+  text('FULL SPEED', 140, 77, P.fg, 1, 'c');
+}
+
+// ---------- HUD: the live step sequencer + the meter ----------
+const ROWS = [['PAD', 'pad', P.pad, P.padD], ['BELL', 'bell', P.bell, P.bellD], ['DRM', 'perc', P.drm, P.drmD],
+              ['ARP', 'arp', P.arp, P.arpD], ['BASS', 'bass', P.bass, P.bassD], ['PROBE', 'beacon', P.beacon, P.beaconD]];
+function hud(t) {
+  const s = Math.floor(t / STEP), b0 = s - (s % 16), cur = s % 16, y0 = 257;
+  cx.fillStyle = P.shadow; cx.fillRect(6, y0 - 1, 172, 60);
+  cx.fillStyle = P.bg; cx.fillRect(4, y0 - 3, 172, 60);
+  cx.fillStyle = P.edge;
+  cx.fillRect(4, y0 - 3, 172, 1); cx.fillRect(4, y0 + 56, 172, 1); cx.fillRect(4, y0 - 3, 1, 60); cx.fillRect(175, y0 - 3, 1, 60);
+  ROWS.forEach(([lab, layer, col, dark], r) => {
+    const y = y0 + 1 + r * 9;
+    let active = false;
+    for (let i = 0; i < 16 && !active; i++) if (hit(layer, b0 + i)) active = true;
+    text(lab, 8, y, active ? (pulse(layer, t, 8) > 0.4 ? P.fg : col) : P.edge);
+    for (let i = 0; i < 16; i++) {
+      const on = hit(layer, b0 + i), x = 30 + i * 9;
+      cx.fillStyle = on ? (i === cur ? P.white : col) : active ? P.grid : '#0a0818';
+      cx.fillRect(x, y, 8, 5);
+    }
+  });
+  cx.fillStyle = P.fg; cx.fillRect(30 + cur * 9, y0 + 55, 8, 1); // playhead
+}
+// the note we hear from the probe, on a log scale from F0 down to 4 octaves below
+function meter(t) {
+  if (!beaconOn(t)) return;
+  const y = 234, k = kAt(t), n = Math.round(20 * clamp(1 + Math.log2(k) / 4, 0, 1));
+  cx.fillStyle = P.bg; cx.fillRect(2, y - 2, 176, 9);
+  text('BEACON', 4, y, P.beacon);
+  for (let j = 0; j < 20; j++) { cx.fillStyle = j < n ? (j === n - 1 ? P.beaconL : P.beacon) : P.grid; cx.fillRect(30 + j * 5, y, 4, 5); }
+  text(`${fmtHz(F0 * k)} HZ`, 176, y, P.beaconL, 1, 'r');
+}
+
+// ---------- scenes ----------
+function sceneTitle(lt, t, ctl) {
+  stars(t, [[90, 150, 24 * 24 * 1.4, 24]]);
+  shadow(90, 150, 24, 0.5 + 0.5 * Math.sin(t * 1.5));
+  card([{ t: 'BLACK HOLE', s: 3, c: P.hole }, { t: 'TIME DILATION', s: 3, c: P.beacon }, { t: `AMBIENT CHIP MIX - ${BPM} BPM`, c: P.dim }], 26);
+  text('5 LAYERS. 1 PROBE. SLOW TIME.', 90, 200, P.dim, 1, 'c');
+  const on = ((t * 2) | 0) % 2 === 0;   // song time when playing; the not-started card is passed wall-clock seconds
+  if (!ctl.started) {
+    if (on) card([{ t: 'TAP TO START', c: P.beacon, s: 2 }], 222);
+    text('HEADPHONES + VOLUME UP', 90, 250, P.edge, 1, 'c');
+  } else if (on) card([{ t: 'LISTEN TO TIME SLOW DOWN', c: P.beacon }], 222);
+}
+
+function sceneFar(lt, t, sec) {
+  const bar = lb(lt);
+  if (bar < 4) {
+    const R = 30, y = 112;
+    stars(t, [[90, y, R * R * 1.4, R]]);
+    shadow(90, y, R, 1 - Math.min(1, since('pad', t) / 2));
+    text(NAME, 90, y + R + 16, P.hole, 1, 'c');
+    banner(`1. ${NAME}`, 'LAYER 1: DRONE PAD', P.pad);
+    fact(bar < 2 ? [`${fmtBig(MASS)} SUNS OF MASS`, { t: `HORIZON ${rough(2 * RS / 1000)} KM ACROSS`, c: P.hole }, { t: SGR ? 'AT THE HEART OF OUR GALAXY' : 'A BLACK HOLE', c: P.dim }]
+                 : ['MASS BENDS SPACE AND TIME', { t: 'CLOSE TO IT, CLOCKS RUN SLOW', c: P.hole }, { t: 'EINSTEIN, 1915', c: P.dim }], P.pad);
+    timeline('THE BLACK DISC IS ITS SHADOW');
+    return;
+  }
+  const v = side(t);
+  clock(22, 60, 7, t / BAR, P.fg, 'US');
+  probeLabels(v, t);
+  const w = lt - 4 * BAR;
+  if (w < 0.3) ditherFill(P.bg, 1 - w / 0.3);
+  banner('1. THE PLAN', 'LAYER 1: DRONE PAD', P.pad);
+  fact(['OUR STATION HOVERS FAR AWAY', { t: 'WE LOWER A PROBE ON A TETHER', c: P.beacon }, { t: 'IT TICKS A CLOCK AND SINGS A NOTE', c: P.dim }], P.pad);
+  timeline('SIDE VIEW. RS = HORIZON RADIUS');
+}
+
+function sceneStop(lt, t, n) {
+  const bar = lb(lt), v = side(t, { ps: n === 3 }), st = STOPS[n], col = [0, P.beacon, P.drm, P.arp][n];
+  if (n === 3) climbWaves(v, t);
+  tape(t, 34);
+  clock(22, 60, 7, t / BAR, P.fg, 'US');
+  probeLabels(v, t);
+  if (n === 1) {
+    banner('2. THE BEACON', 'LAYER 2: BEACON + PULSE BELLS', col);
+    fact(bar < 2 ? [`AT THE STATION: ${fmtHz(F0)} HZ (${KEY})`, { t: '1 TICK PER BEAT, SAME AS OURS', c: col }, { t: 'TWO CLOCKS, IN STEP', c: P.dim }]
+       : bar < 4 ? ['LOWERING IT ON THE TETHER...', { t: `DOWN TO ${fmtR(st.r)} RS`, c: col }, { t: 'WATCH ITS CLOCK, HEAR ITS NOTE', c: P.dim }]
+       : [stopLine(st), { t: `ITS CLOCK RUNS AT ${st.frac} OF OURS`, c: col }, { t: `1 TICK EVERY ${st.frac.split('/').reverse().join('/')} OF OUR BEATS`, c: P.dim }], col);
+    timeline('NOT TO SCALE');
+  } else if (n === 2) {
+    banner('3. DEEPER', 'LAYER 3: SOFT DRUMS', col);
+    fact(bar < 4 ? [stopLine(st), { t: `ITS CLOCK RUNS AT ${st.frac} OF OURS`, c: col }, { t: 'ITS TICKS DRIFT OFF OUR DRUMS', c: P.dim }]
+                 : ['NOTHING IS WRONG WITH ITS CLOCK', { t: 'TIME ITSELF RUNS SLOWER THERE', c: col }, { t: 'ON BOARD, ALL FEELS NORMAL', c: P.dim }], col);
+    timeline('TOP: OUR BEATS. BELOW: ITS TICKS');
+  } else {
+    banner('4. REDSHIFT', 'LAYER 4: ECHO ARP', col);
+    fact(bar < 4 ? [`DOWN TO ${fmtR(st.r)} RS: ${fmtHz(st.f)} HZ (${letterOf(st.f)})`, { t: 'ITS LIGHT STRETCHES AS IT CLIMBS', c: col }, { t: `CYAN LEAVES IT, ${lightName(st.k)} REACHES US`, c: P.dim }]
+                 : ['PHOTON SPHERE: 1.5 RS', { t: 'THERE, LIGHT CAN ORBIT THE HOLE', c: col }, { t: `ITS CLOCK: ${st.frac} OF OURS`, c: P.dim }], col);
+    timeline('SCHEMATIC: WAVES SLOWED FOR DISPLAY');
+  }
+}
+
+function sceneBuild(lt, t, sec) {
+  const s = Math.floor(t / STEP), v = side(t, { ps: true }), st = STOPS[4];
+  tape(t, 34);
+  clock(22, 60, 7, t / BAR, P.fg, 'US');
+  probeLabels(v, t);
+  if (hushAt(s)) {
+    ditherFill(P.bg, 0.5);
+    probe(v.px, v.py, v.k, t);
+    card([{ t: '1 OCTAVE DOWN', s: 2, c: P.beacon }, { t: 'ITS CLOCK: HALF OUR SPEED', c: P.beaconL }], 96);
+  }
+  banner('5. HALF SPEED', 'LAYER 5: TRIANGLE BASS', P.bass);
+  fact([`DOWN TO ${fmtR(st.r)} RS (4/3 RS)`, { t: 'ITS CLOCK FALLS TO HALF SPEED', c: P.bass }, { t: `ITS NOTE: ${fmtHz(st.f)} HZ, 1 OCTAVE DOWN`, c: P.dim }], P.bass);
+  timeline('PHOTON SPHERE DOTTED. NOT TO SCALE');
+}
+
+// --- the drop: three 8-bar parts ---
+function dropHalf(plt, t, s, e8, col) {
+  const v = side(t), st = STOPS[4], ke = pulse('kick', t, 3);
+  ring(90, v.hy, v.rp + 3 + Math.round(since('kick', t) * 30), P.hole, 1, 0.5 * ke);
+  notesUp(v, t, s);
+  bigClocks(t, v.k);
+  probeLabels(v, t, false);
+  text(lightName(v.k), v.px + 8, v.py - 2, P.bell);
+  return { title: '6. HALF TIME',
+    lines: e8 < 4 ? [`AT ${fmtR(st.r)} RS: ${fmtHz(st.f)} HZ, 1 OCTAVE DOWN`, { t: '1 OF ITS SECONDS = 2 OF OURS', c: col }, { t: 'ITS SONG: HALF TEMPO, OCTAVE DOWN', c: P.dim }]
+                  : ['1 HOUR THERE = 2 HOURS HERE', { t: 'STAY A YEAR, THEN COME BACK UP:', c: col }, { t: '2 YEARS HAVE PASSED OUT HERE', c: P.dim }],
+    time: 'SCHEMATIC. NOT TO SCALE' };
+}
+
+function dropScale(plt, t, s, e8, col) {
+  stars(t);
+  const gx = r => Math.round(20 + Math.log(r) / Math.log(6) * 140), gy = k => Math.round(150 - k * 100);
+  line(20, 44, 20, 150, P.edge); line(20, 150, 172, 150, P.edge);
+  text('CLOCK RATE', 22, 38, P.dim);
+  for (const r of [1, 2, 4, 6]) text(String(r), gx(r), 154, P.dim, 1, 'c');
+  text('R/RS', 172, 154, P.dim, 1, 'r');
+  for (const kk of [1, 0.5, 0.25]) { text(fmtHz(F0 * kk), 17, gy(kk) - 2, P.dim, 1, 'r'); line(21, gy(kk), 172, gy(kk), P.grid, 0.4); }
+  text('HZ', 17, 140, P.dim, 1, 'r');
+  // the curve, drawing itself over the first bar: rate = (1 - RS/r)^1/2
+  const reveal = clamp(plt / BAR, 0, 1);
+  for (let x = 20; x <= 20 + 148 * reveal; x += 0.5) { const r = 6 ** ((x - 20) / 140); dot(x, gy(rateAt(r)), P.curve, 1); }
+  text('HORIZON', 23, 141, P.hole);
+  // every stop, with its note
+  STOPS.forEach(st => {
+    const x = st.r === Infinity ? 168 : gx(st.r), y = gy(st.k);
+    fillCircle(x, y, 1, P.beacon);
+    text(letterOf(st.f), x, y - 8, P.beaconL, 1, 'c');
+    text(st.frac, x, y + 4, P.dim, 1, 'c');
+  });
+  text('FAR', 168, 30 + 34, P.dim, 1, 'c');
+  // where the probe is now
+  const k = kAt(t), r = rOfK(k), x = gx(r), y = gy(k), e = tickGlow(t, k);
+  ditherCircle(x, y, 0, 3 + Math.round(3 * e), lightCol(k), 0.5 + 0.4 * e);
+  cx.fillStyle = P.white; cx.fillRect(x, y, 1, 1);
+  return { title: '7. THE SCALE',
+    lines: e8 < 4 ? [`EVERY STOP WAS A NOTE IN ${KEY} MINOR`, { t: 'CLOCK RATES 1, 8/9, 4/5, 2/3, 1/2', c: col }, { t: `NOTES ${STOPS.slice(0, 5).map(st => letterOf(st.f)).join(', ')}`, c: P.dim }]
+                  : ['AT THE HORIZON THE RATE HITS 0', { t: 'NEXT STOP: 1/4, 2 OCTAVES DOWN', c: col }, { t: 'RATE = (1 - RS/R)^1/2', c: P.dim }],
+    time: 'CLOCK RATES SEEN FROM FAR AWAY' };
+}
+
+function dropQuarter(plt, t, s, e8, col) {
+  const rp = Math.round(12 + 24 * smooth(clamp(plt / BAR, 0, 1))), v = side(t, { rp, ps: true }), st = STOPS[5], ke = pulse('kick', t, 3);
+  ring(90, v.hy, v.rp + 3 + Math.round(since('kick', t) * 30), P.hole, 1, 0.5 * ke);
+  notesUp(v, t, s);
+  bigClocks(t, v.k);
+  probeLabels(v, t, false);
+  text(lightName(v.k), v.px + 8, v.py - 2, P.bell);
+  return { title: '8. QUARTER TIME',
+    lines: e8 < 4 ? [`AT ${fmtR(st.r)} RS: ${fmtHz(st.f)} HZ, 2 OCTAVES DOWN`, { t: '1 HOUR THERE = 4 HOURS HERE', c: col }, { t: 'ITS SONG: QUARTER TEMPO', c: P.dim }]
+                  : ['TO HOVER THIS CLOSE IT WOULD', { t: `NEED ${rough(hoverG(st.r))} G OF THRUST`, c: col }, { t: 'NO REAL PROBE COULD', c: P.dim }],
+    time: 'ZOOMED IN. NOT TO SCALE' };
+}
+
+const DROP_PARTS = [dropHalf, dropScale, dropQuarter];
+function sceneDrop(lt, t, sec) {
+  const bar = lb(lt), part = bar >> 3, e8 = bar % 8, s = Math.floor(t / STEP), col = [P.beacon, P.curve, P.bass][part];
+  const r = DROP_PARTS[part](lt - part * 8 * BAR, t, s, e8, col);
+  if (hushAt(s)) {
+    ditherFill(P.bg, 0.5);
+    card([{ t: '2 OCTAVES DOWN', s: 2, c: P.beacon }, { t: 'ITS CLOCK: 1/4 OF OUR SPEED', c: P.beaconL }], 96);
+  }
+  banner(r.title, 'ALL LAYERS: THE DROP', col, col);
+  fact(r.lines, col);
+  timeline(r.time);
+}
+
+function sceneOutro(lt, t, sec) {
+  const bar = lb(lt), k = kAt(t), fade = Math.min(1, Math.sqrt(k / STOPS[5].k));
+  const v = side(t, { rp: 36, ps: true, cut: true, fade });
+  line(90, 0, 90, Math.max(0, Math.round(v.py - 6 - lt * 50)), P.edge);   // the cut tether, reeled in
+  probeLabels(v, t, false);
+  if (bar === 0) text('TETHER CUT', 90, 60, P.dim, 1, 'c');
+  banner('9. LET GO', 'THE PAD ALONE', P.pad);
+  fact(bar < 2 ? ['THE TETHER IS CUT. IT FALLS IN', { t: 'FROM HERE IT SLOWS, REDDENS, DIMS', c: P.beacon }, { t: 'AND NEVER QUITE CROSSES', c: P.dim }]
+               : ['SIZES NOT TO SCALE. WAVES SLOWED', { t: `REALLY: 1 OCTAVE DOWN EVERY ${fmtS(OCT_S)}`, c: P.pad }, { t: 'NO PROBE COULD HOVER THAT CLOSE', c: P.dim }], P.pad);
+  timeline(`SCHEMATIC. FADE ${OCT_S > BAR ? 'SPED UP' : 'SLOWED'}`);
+}
+
+const SCENES = { far: sceneFar, st1: (lt, t) => sceneStop(lt, t, 1), st2: (lt, t) => sceneStop(lt, t, 2), st3: (lt, t) => sceneStop(lt, t, 3),
+                 build: sceneBuild, drop: sceneDrop, outro: sceneOutro };
+
+// ---------- main loop ----------
+function frame() {
+  const started = !!ac;
+  let tau = 0;
+  if (started) tau = Math.max(0, ac.currentTime - T0 - (ac.outputLatency || 0));
+  else if (DEBUG_T !== null) tau = DEBUG_T;
+  if (started || DEBUG_T !== null) draw(tau);
+  else {
+    cx.setTransform(1, 0, 0, 1, 0, 0);
+    cx.fillStyle = P.bg; cx.fillRect(0, 0, W, H);
+    sceneTitle(0, performance.now() / 1000, { started });
+  }
+  if (started && ac.state === 'suspended') card([{ t: 'PAUSED', c: P.beacon, s: 2 }], 150);
+  requestAnimationFrame(frame);
+}
+
+function draw(tau) {
+  const t = tau % LOOP;
+  const bar = Math.floor(t / BAR), sec = SONG[BAR_SEC[bar]], lt = t - sec.start * BAR;
+  cx.setTransform(1, 0, 0, 1, 0, 0);
+  cx.fillStyle = P.bg; cx.fillRect(0, 0, W, H);
+  if (sec.id === 'title') sceneTitle(lt, t, { started: true });
+  else SCENES[sec.id](lt, t, sec);
+  if (sec.id !== 'title') { meter(t); hud(t); }
+  if (lt < 0.3 && sec.k > 0) ditherFill(P.bg, 1 - lt / 0.3);
+  const pl = lt % (8 * BAR);
+  if (sec.id === 'drop' && !CALM && pl < 0.4) ditherFill(P.white, 0.35 * (1 - pl / 0.4));
+}
+
+// video export (scene-to-short): one loop of frames and audio, rendered offline on the same clock
+window.__capture = {
+  duration: LOOP,
+  thumb: SONG.find(s => s.id === 'drop').start * BAR + 2 * BAR + 6 * STEP,   // two bars into the drop, between kicks (no flash)
+  frame: tau => draw(tau),
+  async audio(sr = 48000) {
+    const live = ac;
+    ac = new OfflineAudioContext(2, Math.round(LOOP * sr), sr);
+    buildGraph(); master.gain.value = 0.9;
+    for (let s = 0; s < TOTAL_STEPS; s++) playStep(s, s * STEP);
+    const buf = await ac.startRendering();
+    ac = live;
+    return { sampleRate: sr, L: buf.getChannelData(0), R: buf.getChannelData(1) };
+  },
+};
+frame();
+})();
+</script>
+</body>
+</html>
