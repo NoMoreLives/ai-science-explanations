@@ -59,8 +59,16 @@ function envelopes(hit, { STEP }) {
 
 // ---------- canvas + gfx helpers ----------
 const cv = document.getElementById('c');
-const cx = cv.getContext('2d');
-cx.imageSmoothingEnabled = false;
+const screen = cv.getContext('2d');
+screen.imageSmoothingEnabled = false;
+let cx = screen;    // what the helpers draw on: the screen, or an offscreen sprite inside withContext()
+
+// draw with these helpers into another 2D context (an offscreen sprite), then back to the screen
+function withContext(c, fn) {
+  const keep = cx;
+  cx = c;
+  try { fn(); } finally { cx = keep; }
+}
 let P = NEUTRALS;   // set by gfx(): card() and the main loop draw in the scene's palette
 
 // 3x5 pixel font, rows top to bottom
@@ -203,7 +211,7 @@ function ditherFill(col, d) {
 function gfx(palette) {
   P = palette;
   cv.style.background = P.bg;
-  return { cv, cx, text, textW, card, BAYER, bay, fillCircle, ditherCircle, dEllipse, ring, line, dot, ditherFill };
+  return { cv, cx: screen, withContext, text, textW, card, BAYER, bay, fillCircle, ditherCircle, dEllipse, ring, line, dot, ditherFill };
 }
 
 // ---------- seeded randomness ----------
