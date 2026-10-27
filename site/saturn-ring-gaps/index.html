@@ -5,28 +5,22 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Saturn's Ring Gaps: Octave Mix</title>
 <link rel="icon" type="image/svg+xml" href="icon.svg">
-<style>
-  html,body{margin:0;height:100%;background:#03030c;color:#6f6c99;font:12px monospace}
-  body{display:flex;flex-direction:column;align-items:center;justify-content:center}
-  canvas{height:min(92vh,calc(100vw*16/9));aspect-ratio:9/16;image-rendering:pixelated;cursor:pointer;background:#08081a}
-  p{margin:6px 16px 0;text-align:center}
-</style>
+<link rel="stylesheet" href="../engine/engine.css">
 </head>
 <body>
 <canvas id="c" width="180" height="320"></canvas>
 <p>click / space: play-pause &middot; m: mute &middot; headphones + volume up &middot; ?bpm=140 &amp;eps=0.4 (probe start offset) &amp;calm=1 (no shake/flash)</p>
+<script src="../engine/engine.js"></script>
 <script>
 (() => {
 'use strict';
 
 // ---------- config ----------
-const q = new URLSearchParams(location.search);
-const num = (k, d, lo, hi) => { const n = parseFloat(q.get(k)); return n >= lo && n <= hi ? n : d; };
+const { W, H } = Engine;
+const { clamp } = Engine.math;
+const { num, CALM, SHORT } = Engine.params;
 const BPM = num('bpm', 140, 100, 180);
 const EPS0 = num('eps', 0.4, 0.1, 0.45);  // the probe starts orbiting 2 x (1 + EPS0) times per Mimas orbit
-const CALM = q.get('calm') === '1';       // no screen shake or flashes
-const SHORT = q.get('short') === '1';     // YouTube Short: a hit on the first frame
-const DEBUG_T = q.has('t') ? parseFloat(q.get('t')) : null; // freeze visuals at t seconds (no audio)
 
 // ---------- the physics: every number on screen and every orbit tone comes from here ----------
 const GM = 37931187;                       // Saturn, km^3/s^2
@@ -59,9 +53,6 @@ const SPEEDUP = F_MIMAS * period(MOON.mimas.a);             // ~12 million
 const toneAt = r => F_MIMAS * Math.pow(MOON.mimas.a / r, 1.5);
 const radiusFor = eps => R21 * Math.pow(1 + eps, -2 / 3);   // where a particle orbits 2(1+eps) times per Mimas orbit
 
-const W = 180, H = 320;
-const STEP = 60 / BPM / 4, BEAT = STEP * 4, BAR = STEP * 16;
-
 // ---------- the track: one section per idea, each adding one channel ----------
 const SONG = [
   { id: 'title', bars: 2 },
@@ -74,10 +65,8 @@ const SONG = [
   { id: 'drop', bars: 32 },   // everything
   { id: 'outro', bars: 4 },
 ];
-const BAR_SEC = [];
-{ let a = 0; SONG.forEach((s, k) => { s.start = a; s.k = k; a += s.bars; for (let b = 0; b < s.bars; b++) BAR_SEC.push(k); }); }
-const TOTAL_STEPS = BAR_SEC.length * 16;
-const LOOP = TOTAL_STEPS * STEP;
+const clock = Engine.clock(BPM, SONG);
+const { STEP, BAR, BEAT, BAR_SEC, LOOP, at, lb } = clock;
 
 // ---------- the resonance section: a probe slides out to 2:1 ----------
 // Mimas laps once per two beats on screen. The probe starts at 2(1+EPS0) laps per Mimas lap and eases to exactly 2.
@@ -139,11 +128,6 @@ const DMAJ = [];
 for (let m = 30; m < 110; m++) if ([1, 2, 4, 6, 7, 9, 11].includes(m % 12)) DMAJ.push(m);
 const third = m => { const k = DMAJ.indexOf(m); return k >= 2 ? DMAJ[k - 2] : m - 3; };
 
-function at(s) {
-  s = ((s % TOTAL_STEPS) + TOTAL_STEPS) % TOTAL_STEPS;
-  const bar = (s / 16) | 0, sec = SONG[BAR_SEC[bar]];
-  return { sec, id: sec.id, lb: bar - sec.start, i: s % 16 };
-}
 function chordAt(id, lb) {
   if (id === 'drop') return PROG_D[lb % 8];
   if (id === 'res') return PROG_R[lb % 4];
@@ -215,9 +199,10 @@ function hit(layer, s) {
   }
   return 0;
 }
+const { pulse } = Engine.envelopes(hit, clock);
 
 const P = {
-  bg: '#08081a', grid: '#151532', edge: '#36345f', dim: '#8f8cba', fg: '#f4efdc', shadow: '#000000', white: '#ffffff',
+  ...Engine.NEUTRALS,
   sat1: '#e8cc8e', sat2: '#b8935a', sat3: '#6c5232', satL: '#fff3cf', satD: '#2e2416',
   ringB: '#efe3c2', ringA: '#c9bb98', ringC: '#7a7060',
   mimas: '#ff6ad5', pan: '#5cf08a', daph: '#3de0d0', prom: '#ff6262', pand: '#b48cff', janus: '#ff9a3c',
@@ -227,61 +212,10 @@ const P = {
 const CYC = [P.mimas, P.pan, P.kick, P.pand, P.janus, P.probe];
 
 // ---------- canvas + gfx helpers ----------
-const cv = document.getElementById('c');
-let cx = cv.getContext('2d');
-cx.imageSmoothingEnabled = false;
+const { cx: screen, withContext, text, textW, card, bay, fillCircle, ditherCircle, ring, line, dot, ditherFill } = Engine.gfx(P);
+let cx = screen;   // the local pixel helpers draw on cx: swapped to an offscreen sprite while one is drawn
+const { mulberry, hash } = Engine.rand;
 
-// 3x5 pixel font, rows top to bottom
-const FONT = {
-  A:'010 101 111 101 101', B:'110 101 110 101 110', C:'011 100 100 100 011', D:'110 101 101 101 110',
-  E:'111 100 110 100 111', F:'111 100 110 100 100', G:'011 100 101 101 011', H:'101 101 111 101 101',
-  I:'111 010 010 010 111', J:'001 001 001 101 010', K:'101 101 110 101 101', L:'100 100 100 100 111',
-  M:'101 111 111 101 101', N:'110 101 101 101 101', O:'010 101 101 101 010', P:'110 101 110 100 100',
-  Q:'010 101 101 111 011', R:'110 101 110 101 101', S:'011 100 010 001 110', T:'111 010 010 010 010',
-  U:'101 101 101 101 111', V:'101 101 101 101 010', W:'101 101 111 111 101', X:'101 101 010 101 101',
-  Y:'101 101 010 010 010', Z:'111 001 010 100 111',
-  0:'111 101 101 101 111', 1:'010 110 010 010 111', 2:'110 001 010 100 111', 3:'110 001 010 001 110',
-  4:'101 101 111 001 001', 5:'111 100 110 001 110', 6:'011 100 111 101 111', 7:'111 001 010 010 010',
-  8:'111 101 111 101 111', 9:'111 101 111 001 110',
-  '-':'000 000 111 000 000', '.':'000 000 000 000 010', ':':'000 010 000 010 000',
-  '=':'000 111 000 111 000', '+':'000 010 111 010 000', '!':'010 010 010 000 010', '?':'110 001 010 000 010',
-  '>':'100 010 001 010 100', '<':'001 010 100 010 001', '/':'001 001 010 100 100', ',':'000 000 000 010 100',
-  '(':'010 100 100 100 010', ')':'010 001 001 001 010', "'":'010 010 000 000 000', '#':'101 111 101 111 101',
-};
-const GL = {};
-for (const k in FONT) GL[k] = FONT[k].replace(/ /g, '');
-
-const textW = (s, sc) => s.length * 4 * sc - sc;
-function text(s, x, y, col, sc = 1, align = 'l') {
-  s = String(s).toUpperCase();
-  if (align === 'c') x = Math.round(x - textW(s, sc) / 2);
-  else if (align === 'r') x -= textW(s, sc);
-  cx.fillStyle = col;
-  for (let i = 0; i < s.length; i++) {
-    const g = GL[s[i]];
-    if (!g) continue;
-    for (let k = 0; k < 15; k++) {
-      if (g[k] === '1') cx.fillRect(x + i * 4 * sc + (k % 3) * sc, y + ((k / 3) | 0) * sc, sc, sc);
-    }
-  }
-}
-
-// bordered caption box; lines = [{t, c, s}]
-function card(lines, y, cxp = 90, border = P.fg) {
-  let w = 0, h = 4;
-  for (const l of lines) { const s = l.s || 1; w = Math.max(w, textW(String(l.t), s)); h += 5 * s + 3; }
-  w += 10;
-  if (w > W) console.warn('card too wide:', lines.map(l => l.t).join(' / '));
-  const x = Math.round(cxp - w / 2);
-  cx.fillStyle = P.shadow; cx.fillRect(x + 2, y + 2, w, h);
-  cx.fillStyle = P.bg;     cx.fillRect(x, y, w, h);
-  cx.fillStyle = border;
-  cx.fillRect(x, y, w, 1); cx.fillRect(x, y + h - 1, w, 1);
-  cx.fillRect(x, y, 1, h); cx.fillRect(x + w - 1, y, 1, h);
-  let ty = y + 4;
-  for (const l of lines) { const s = l.s || 1; text(l.t, cxp, ty, l.c || P.fg, s, 'c'); ty += 5 * s + 3; }
-  return h;
-}
 // a label with a dark backing, kept on screen; used for tags that follow moving objects
 function tag(s, x, y, col) {
   const w = textW(s, 1);
@@ -290,83 +224,18 @@ function tag(s, x, y, col) {
   text(s, x, y, col);
 }
 
-const BAYER = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
-const bay = (x, y) => BAYER[(y & 3) * 4 + (x & 3)];
-
-function mulberry(a) { return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
 const rng = mulberry(1655);  // Huygens saw the rings as a ring
-const hash = n => { n = Math.imul(n ^ 0x5bd1e995, 0x27d4eb2d); n ^= n >>> 15; n = Math.imul(n, 0x85ebca6b); n ^= n >>> 13; return (n >>> 0) / 4294967296; };
-const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const vnoise = x => { const i = Math.floor(x), f = x - i, u = f * f * (3 - 2 * f); return hash(i) * (1 - u) + hash(i + 1) * u; };
 const fmt = n => Math.round(n).toLocaleString('en-US');
 const fmtTo = (n, step) => fmt(Math.round(n / step) * step);
 const hz = f => f >= 10 ? fmt(f) : f.toFixed(1);
 
 function pset(x, y, col) { cx.fillStyle = col; cx.fillRect(Math.round(x), Math.round(y), 1, 1); }
-function dot(x, y, col, d) { x = Math.round(x); y = Math.round(y); if (bay(x, y) < d * 16) { cx.fillStyle = col; cx.fillRect(x, y, 1, 1); } }
 
-function fillCircle(x, y, r, col) {
-  if (r < 0) return;
-  x = Math.round(x); y = Math.round(y);
-  cx.fillStyle = col;
-  for (let dy = -r; dy <= r; dy++) {
-    const dx = Math.floor(Math.sqrt((r + .5) * (r + .5) - dy * dy));
-    cx.fillRect(x - dx, y + dy, 2 * dx + 1, 1);
-  }
-}
-
-// ordered-dither ring/disc, d = 0..1 density
-function ditherCircle(x, y, r0, r1, col, d) {
-  if (d <= 0) return;
-  x = Math.round(x); y = Math.round(y); r1 = Math.round(r1);
-  cx.fillStyle = col;
-  const lvl = d * 16;
-  for (let py = y - r1; py <= y + r1; py++) {
-    for (let px = x - r1; px <= x + r1; px++) {
-      const dd = (px - x) ** 2 + (py - y) ** 2;
-      if (dd <= r1 * r1 && dd >= r0 * r0 && bay(px, py) < lvl) cx.fillRect(px, py, 1, 1);
-    }
-  }
-}
-
-// thin dithered circle sampled by angle; sy squashes it into an ellipse
-function ring(x, y, r, col, d, sy = 1) {
-  if (d <= 0 || r < 1) return;
-  cx.fillStyle = col;
-  const lvl = d * 16, n = Math.ceil(r * 7) + 8;
-  for (let k = 0; k < n; k++) {
-    const a = k / n * 2 * Math.PI, px = Math.round(x + Math.cos(a) * r), py = Math.round(y + Math.sin(a) * r * sy);
-    if (bay(px, py) < lvl) cx.fillRect(px, py, 1, 1);
-  }
-}
-
-function line(x0, y0, x1, y1, col, d = 1) {
-  cx.fillStyle = col;
-  const n = Math.max(Math.abs(x1 - x0), Math.abs(y1 - y0), 1);
-  for (let k = 0; k <= n; k++) {
-    const px = Math.round(x0 + (x1 - x0) * k / n), py = Math.round(y0 + (y1 - y0) * k / n);
-    if (d >= 1 || bay(px, py) < d * 16) cx.fillRect(px, py, 1, 1);
-  }
-}
 function arrow(x0, y0, x1, y1, col) {
   line(x0, y0, x1, y1, col);
   const a = Math.atan2(y1 - y0, x1 - x0);
   for (const s of [-1, 1]) line(x1, y1, x1 + 3 * Math.cos(a + s * 2.5), y1 + 3 * Math.sin(a + s * 2.5), col);
-}
-
-// dithered pattern fills: d of a 4x4 tile in col (cached)
-const PAT = {};
-function ditherFill(col, d) {
-  const n = Math.max(0, Math.min(16, Math.round(d * 16)));
-  if (!n) return;
-  const key = col + n;
-  if (!PAT[key]) {
-    const t = document.createElement('canvas'); t.width = t.height = 4;
-    const c = t.getContext('2d'); c.fillStyle = col;
-    for (let i = 0; i < 16; i++) if (BAYER[i] < n) c.fillRect(i % 4, (i / 4) | 0, 1, 1);
-    PAT[key] = cx.createPattern(t, 'repeat');
-  }
-  cx.fillStyle = PAT[key]; cx.fillRect(0, 0, W, H);
 }
 
 function panel(x0, y0, x1, y1, border = P.edge) {
@@ -382,7 +251,7 @@ const SPR = {};
 function sprite(key, w, h, fn) {
   if (!SPR[key]) {
     const c = document.createElement('canvas'); c.width = w; c.height = h;
-    const keep = cx; cx = c.getContext('2d'); fn(); cx = keep;
+    const keep = cx; cx = c.getContext('2d'); withContext(cx, fn); cx = keep;
     SPR[key] = c;
   }
   return SPR[key];
@@ -479,30 +348,10 @@ function fact(lines, border = P.edge, y = 202) { return card(lines.map(l => type
 const small = (s, y, col = P.edge) => text(s, 90, y, col, 1, 'c');
 
 // ---------- audio: a 4-channel Game Boy-style synth, plus two pure orbit tones ----------
-let ac = null, master, comp, secGain, chIn, teach, T0 = 0, muted = false, step = 0, timer = null, bag = null;
-let sq125, sq25, sq50, waveBass, lfsr15, lfsr7;
-const track = n => { if (bag) bag.push(n); return n; };
-function G(v) { const g = track(ac.createGain()); g.gain.value = v; return g; }
-function F(type, f, Q = 0.7) { const b = track(ac.createBiquadFilter()); b.type = type; b.frequency.value = f; b.Q.value = Q; return b; }
-function pan(p) { const n = track(ac.createStereoPanner()); n.pan.value = p; return n; }
+const { ctx, track, G, F, pan, osc, play } = Engine.audio;
+let master, comp, secGain, chIn, teach;
+let waveBass, lfsr15, lfsr7;
 function chain(...n) { for (let i = 0; i < n.length - 1; i++) n[i].connect(n[i + 1]); return n[n.length - 1]; }
-function osc(wave, f, t) {
-  const o = track(ac.createOscillator());
-  if (typeof wave === 'string') o.type = wave; else o.setPeriodicWave(wave);
-  o.frequency.setValueAtTime(f, t);
-  return o;
-}
-function play(o, t, dur) { o.start(t); o.stop(t + dur + 0.03); }
-
-function pulseWave(d) {
-  const N = 64, re = new Float32Array(N), im = new Float32Array(N);
-  for (let n = 1; n < N; n++) {
-    const a = 2 / (n * Math.PI);
-    re[n] = a * Math.sin(n * Math.PI * d) * Math.cos(n * Math.PI * d);
-    im[n] = a * Math.sin(n * Math.PI * d) ** 2;
-  }
-  return ac.createPeriodicWave(re, im);
-}
 
 // the wave channel: 32 four-bit samples, played back as the exact Fourier series of that staircase
 const WAVE_RAM = Array.from({ length: 32 }, (_, k) => clamp(Math.round(7.5 + 5.6 * Math.sin(2 * Math.PI * k / 32) + 1.9 * (2 * k / 32 - 1)), 0, 15));
@@ -515,12 +364,12 @@ function stepWave(v) {
     re[n] = 2 * (xr * c - xi * sn) * s;
     im[n] = -2 * (xr * sn + xi * c) * s;
   }
-  return ac.createPeriodicWave(re, im);
+  return ctx().createPeriodicWave(re, im);
 }
 
 // the noise channel: a 15-bit (hiss) or 7-bit (metallic buzz) linear-feedback shift register, one step per sample
 function lfsr(short) {
-  const n = short ? 127 * 256 : 32767, b = ac.createBuffer(1, n, ac.sampleRate), d = b.getChannelData(0);
+  const n = short ? 127 * 256 : 32767, b = ctx().createBuffer(1, n, ctx().sampleRate), d = b.getChannelData(0);
   let r = 0x7fff;
   for (let i = 0; i < n; i++) {
     const bit = (r ^ (r >> 1)) & 1;
@@ -567,8 +416,8 @@ function waveNote(t, m, dur) {
   chain(o, g, chIn.wav); play(o, t, dur);
 }
 function noiseHit(t, dur, v0, dir, per, clock, short, p = 0) {
-  const s = track(ac.createBufferSource()); s.buffer = short ? lfsr7 : lfsr15; s.loop = true;
-  s.playbackRate.value = clock / ac.sampleRate;
+  const s = track(ctx().createBufferSource()); s.buffer = short ? lfsr7 : lfsr15; s.loop = true;
+  s.playbackRate.value = clock / ctx().sampleRate;
   const g = G(0); gbEnv(g, t, v0, dir, per, dur);
   chain(s, g, pan(p), chIn.noi);
   s.start(t, (t * 7.31) % 0.3); s.stop(t + dur + 0.03);
@@ -576,7 +425,7 @@ function noiseHit(t, dur, v0, dir, per, clock, short, p = 0) {
 
 // kick: a pulse whose pitch falls in hardware-sized steps, under a soft triangle body
 function kick(t, vel) {
-  const o = osc(sq50, 300, t), b = osc('triangle', 150, t), g = G(0), gb = G(0);
+  const o = osc(0.5, 300, t), b = osc('triangle', 150, t), g = G(0), gb = G(0);
   for (let k = 1; k <= 10; k++) { o.frequency.setValueAtTime(300 * 0.76 ** k, t + k * 0.008); b.frequency.setValueAtTime(150 * 0.8 ** k, t + k * 0.008); }
   gbEnv(g, t, Math.round(12 * vel), -1, 1, 0.14);
   gbEnv(gb, t, Math.round(15 * vel), -1, 1, 0.2);
@@ -586,7 +435,7 @@ function kick(t, vel) {
 }
 function snare(t, vel, pm = 1) {
   noiseHit(t, 0.2, Math.round(14 * vel), -1, 1, 22000 * pm, false);
-  const o = osc(sq50, 220 * pm, t), g = G(0);
+  const o = osc(0.5, 220 * pm, t), g = G(0);
   o.frequency.setValueAtTime(160 * pm, t + 0.02);
   gbEnv(g, t, Math.round(9 * vel), -1, 1, 0.08);
   chain(o, F('lowpass', 1500), g, chIn.noi); play(o, t, 0.08);
@@ -596,11 +445,11 @@ const hat = (t, vel, open) => open ? noiseHit(t, 0.16, Math.round(8 * vel), -1, 
 const crash = t => { noiseHit(t, 1.3, 12, -1, 6, 140000, false, -0.4); noiseHit(t, 1.1, 10, -1, 5, 110000, false, 0.4); };
 // a noise riser: the shift register's clock stepped up, louder each step
 function riser(t, dur, vol) {
-  const s = track(ac.createBufferSource()); s.buffer = lfsr15; s.loop = true;
+  const s = track(ctx().createBufferSource()); s.buffer = lfsr15; s.loop = true;
   const g = G(0), n = 24;
   for (let k = 0; k < n; k++) {
     const tt = t + dur * k / n;
-    s.playbackRate.setValueAtTime(3000 * Math.pow(60, k / n) / ac.sampleRate, tt);
+    s.playbackRate.setValueAtTime(3000 * Math.pow(60, k / n) / ctx().sampleRate, tt);
     g.gain.setValueAtTime(vol * Math.round(1 + 10 * k / n) / 15, tt);
   }
   g.gain.setValueAtTime(0, t + dur);
@@ -608,7 +457,7 @@ function riser(t, dur, vol) {
 }
 // channel 1's frequency sweep: each step adds f/2^shift
 function sweepUp(t, m, dur, v0) {
-  const o = osc(sq125, midiHz(m), t), g = G(0);
+  const o = osc(0.125, midiHz(m), t), g = G(0);
   let f = midiHz(m);
   for (let k = 1; k * 1 / 64 < dur && f < 4000; k++) { f += f / 8; o.frequency.setValueAtTime(f, t + k / 64); }
   gbEnv(g, t, v0, -1, 2, dur);
@@ -616,14 +465,14 @@ function sweepUp(t, m, dur, v0) {
 }
 // the kick from Mimas, heard: a high blip on pulse 2
 function conjBlip(t) {
-  const o = osc(sq125, midiHz(93), t), g = G(0);
+  const o = osc(0.125, midiHz(93), t), g = G(0);
   o.frequency.setValueAtTime(midiHz(88), t + 0.03);
   gbEnv(g, t, 11, -1, 1, 0.12);
   chain(o, g, pan(0), chIn.sq2); play(o, t, 0.12);
 }
 function chime(t) {
-  pulseNote(sq125, t, 86, 0.07, 6, -1, 1, -0.4, chIn.sq2);
-  pulseNote(sq125, t + 0.07, 93, 0.12, 6, -1, 2, 0.4, chIn.sq2);
+  pulseNote(0.125, t, 86, 0.07, 6, -1, 1, -0.4, chIn.sq2);
+  pulseNote(0.125, t + 0.07, 93, 0.12, 6, -1, 2, 0.4, chIn.sq2);
 }
 
 // the teaching signal: pure sines straight to the master, no compressor, no effects.
@@ -637,7 +486,7 @@ function orbitTones(t) {
   }
   const curve = new Float32Array(257);
   for (let k = 0; k <= 256; k++) curve[k] = toneAt(radiusFor(epsAt(k / 256 * SWEEP)));
-  const o = track(ac.createOscillator()), g = G(0);
+  const o = track(ctx().createOscillator()), g = G(0);
   o.type = 'sine'; o.frequency.value = curve[0];
   o.frequency.setValueCurveAtTime(curve, t, SWEEP);
   fade(g, 0.12);
@@ -650,20 +499,11 @@ function bassLen(s) {
   return n;
 }
 
-function playStep(s, t) {
-  bag = [];
-  voices(s, t);
-  const nodes = bag, srcs = nodes.filter(n => typeof n.stop === 'function');
-  bag = null;
-  let left = srcs.length;
-  for (const n of srcs) n.onended = () => { if (--left === 0) for (const m of nodes) m.disconnect(); };
-}
-
 function voices(s, t) {
   const { id, lb, i } = at(s), D = id === 'drop', part = lb >> 3, e8 = lb % 8;
   if (i === 0) secGain.gain.setValueAtTime(D ? 1.25 : 0.72, t);
   if (i === 0 && lb === 0 && ['orbits', 'moon', 'wakes', 'shep', 'res'].includes(id)) chime(t);
-  if (SHORT && s === 0) { kick(t, 1); crash(t); waveNote(t, 38, BEAT); for (const m of CH.D) pulseNote(sq25, t, m + 12, BEAT, 8, -1, 4, 0, chIn.sq2); }
+  if (SHORT && s === 0) { kick(t, 1); crash(t); waveNote(t, 38, BEAT); for (const m of CH.D) pulseNote(0.25, t, m + 12, BEAT, 8, -1, 4, 0, chIn.sq2); }
   if (id === 'title' && lb === 1 && i === 0) riser(t, BAR, 0.8);
   if (id === 'build' && lb === 0 && i === 0) riser(t, 3 * BAR + 12 * STEP, 0.6);
   if (D && e8 === 7 && i === 0 && lb !== 31) riser(t, BAR * 0.95, 0.55);
@@ -674,16 +514,16 @@ function voices(s, t) {
   const sn = hit('snare', s); if (sn) snare(t, sn, id === 'build' ? 1 + lb * 0.2 + i / 80 : 1);
   const h = hit('hat', s); if (h) hat(t, h, D && i === 14);
   if (hit('crash', s)) crash(t);
-  const a = hit('arp', s); if (a) pulseNote(sq125, t, a, STEP * 0.9, id === 'res' ? 6 : D ? 7 : 8, -1, 1, (i >> 1) % 2 ? 0.6 : -0.6, chIn.sq2);
+  const a = hit('arp', s); if (a) pulseNote(0.125, t, a, STEP * 0.9, id === 'res' ? 6 : D ? 7 : 8, -1, 1, (i >> 1) % 2 ? 0.6 : -0.6, chIn.sq2);
   const L = hit('lead', s);
-  if (L) pulseNote(D ? sq25 : sq50, t, L[0], L[1] * STEP * 0.96, D ? 12 : 10, 0, 0, id === 'shep' ? (lb % 2 ? 0.6 : -0.6) : D && part === 1 ? -0.35 : 0, chIn.sq1, L[1] >= 4);
-  const e = hit('echo', s); if (e) pulseNote(sq25, t, e[0], e[1] * STEP * 0.9, 6, 0, 0, 0.55, chIn.sq2);
-  const hm = hit('harm', s); if (hm) pulseNote(sq125, t, hm[0], hm[1] * STEP * 0.9, 8, 0, 0, 0.3, chIn.sq2, hm[1] >= 4);
+  if (L) pulseNote(D ? 0.25 : 0.5, t, L[0], L[1] * STEP * 0.96, D ? 12 : 10, 0, 0, id === 'shep' ? (lb % 2 ? 0.6 : -0.6) : D && part === 1 ? -0.35 : 0, chIn.sq1, L[1] >= 4);
+  const e = hit('echo', s); if (e) pulseNote(0.25, t, e[0], e[1] * STEP * 0.9, 6, 0, 0, 0.55, chIn.sq2);
+  const hm = hit('harm', s); if (hm) pulseNote(0.125, t, hm[0], hm[1] * STEP * 0.9, 8, 0, 0, 0.3, chIn.sq2, hm[1] >= 4);
   if (hit('sweep', s)) sweepUp(t, id === 'title' ? 50 + lb * 7 : 57 + lb * 5, id === 'title' ? 0.5 : 0.3, id === 'title' ? 8 : 7);
 }
 
-function buildGraph() {
-  master = G(0.0001); master.connect(ac.destination);
+function buildGraph(ac, out) {
+  master = out;
   comp = ac.createDynamicsCompressor();
   comp.threshold.value = -7; comp.knee.value = 6; comp.ratio.value = 3; comp.attack.value = 0.003; comp.release.value = 0.15;
   secGain = G(0.72);                                   // section level: the drop gets the headroom
@@ -691,48 +531,10 @@ function buildGraph() {
   chIn = { sq1: G(0.2), sq2: G(0.15), wav: G(0.17), noi: G(0.3) };
   for (const k in chIn) chIn[k].connect(secGain);
   teach = G(1); teach.connect(master);                 // orbit tones bypass everything
-  sq125 = pulseWave(0.125); sq25 = pulseWave(0.25); sq50 = pulseWave(0.5);
   waveBass = stepWave(WAVE_RAM);
   lfsr15 = lfsr(false); lfsr7 = lfsr(true);
 }
 
-function schedule() {
-  if (ac.state !== 'running') return;
-  const now = ac.currentTime;
-  while (T0 + step * STEP < now + 0.15) {
-    const t = T0 + step * STEP;
-    if (t > now - 0.02) playStep(step, t); // skip steps missed while the tab was throttled
-    step++;
-  }
-}
-
-function startAudio() {
-  ac = new (window.AudioContext || window.webkitAudioContext)();
-  buildGraph();
-  T0 = ac.currentTime + 0.2; step = 0;
-  timer = setInterval(schedule, 25); schedule();
-  master.gain.setTargetAtTime(muted ? 0.0001 : 0.9, ac.currentTime, 0.2);
-  ac.resume();
-}
-
-// offline render for checking levels without ears: __render(fromBar, bars) -> per-bar peak/rms
-window.__render = async (bar0, bars, sr = 22050) => {
-  const live = ac;
-  ac = new OfflineAudioContext(2, Math.ceil((bars * BAR + 1) * sr), sr);
-  buildGraph(); master.gain.value = 0.9;
-  for (let s = bar0 * 16; s < (bar0 + bars) * 16; s++) playStep(s, 0.05 + (s - bar0 * 16) * STEP);
-  const buf = await ac.startRendering();
-  ac = live;
-  const L = buf.getChannelData(0), out = [];
-  for (let b = 0; b < bars; b++) {
-    let pk = 0, sum = 0, n = 0;
-    for (let i = Math.floor((0.05 + b * BAR) * sr); i < Math.floor((0.05 + (b + 1) * BAR) * sr); i++) { const v = Math.abs(L[i]); pk = Math.max(pk, v); sum += v * v; n++; }
-    const s = SONG[BAR_SEC[bar0 + b]];
-    out.push({ bar: bar0 + b, sec: s.id, lb: bar0 + b - s.start, peak: +pk.toFixed(3), rms: +Math.sqrt(sum / n).toFixed(3) });
-  }
-  return out;
-};
-window.__song = () => SONG.map(s => ({ id: s.id, start: s.start * BAR, bars: s.bars }));
 window.__phys = () => ({
   R21, F_MIMAS, SPEEDUP, probeStartKm: radiusFor(EPS0), probeStartHz: toneAt(radiusFor(EPS0)), lockHz: toneAt(R21),
   hInner: hours(RING.C), hBEdge: hours(RING.B_END), hOuter: hours(RING.A_END), hMimas: hours(MOON.mimas.a),
@@ -740,27 +542,7 @@ window.__phys = () => ({
   cassiniKm: RING.A - RING.B_END, conj: CONJ, res: RES_LIST.map(r => [r.lab, Math.round(r.r)]),
 });
 
-function toggle() {
-  if (!ac) { startAudio(); return; }
-  if (ac.state === 'running') ac.suspend(); else ac.resume();
-}
-function toggleMute() {
-  muted = !muted;
-  if (ac) master.gain.setTargetAtTime(muted ? 0.0001 : 0.9, ac.currentTime, 0.1);
-}
-cv.addEventListener('click', toggle);
-addEventListener('keydown', e => {
-  if (e.code === 'Space') { e.preventDefault(); toggle(); }
-  else if (e.key === 'm' || e.key === 'M') toggleMute();
-});
-
 // ---------- visual envelopes, read from the same hit() table ----------
-function since(layer, t, back = 64) {
-  const s = Math.floor(t / STEP);
-  for (let k = 0; k < back; k++) if (hit(layer, s - k)) return t - (s - k) * STEP;
-  return 99;
-}
-const pulse = (layer, t, rate = 10) => Math.exp(-since(layer, t) * rate);
 const barOf = lt => Math.floor(lt / BAR);
 
 // ---------- HUD: a four-green tracker screen ----------
@@ -976,7 +758,7 @@ function resStage(X, Y, t, aM) {
   stars(t);
   drawRings(X, Y, RES_SC, 1, 0, 0.45);
   drawPlanet(X, Y, R_SAT / RES_SC, 1);
-  ring(X, Y, MOON.mimas.a / RES_SC, P.mimas, 0.3);
+  ring(X, Y, MOON.mimas.a / RES_SC, P.mimas, 1, 0.3);
   const mx = X + MOON.mimas.a / RES_SC * Math.cos(aM), my = Y - MOON.mimas.a / RES_SC * Math.sin(aM);
   return { mx, my };
 }
@@ -989,11 +771,11 @@ function drawMimas(m) {
 function sceneRes(lt, t, sec) {
   const X = 90, Y = 116, bar = barOf(lt), eps = epsAt(lt), rKm = radiusFor(eps), aM = mimasAng(lt), aP = aM + relAng(lt);
   const m = resStage(X, Y, t, aM), r21 = R21 / RES_SC, locked = lt >= SWEEP, n = kicksBy(lt);
-  ring(X, Y, r21, P.kick, 0.3);
+  ring(X, Y, r21, P.kick, 1, 0.3);
   // the probe's orbit: a circle while sliding, then stretched a little more by every kick once locked
   const e = Math.min(0.32, n * 0.038), a = rKm / RES_SC, peri = KICK_A + Math.PI;
   const rOf = th => a * (1 - e * e) / (1 + e * Math.cos(th - peri));
-  if (locked) for (const dl of [-6, -3, 3, 6]) ring(X, Y, r21 + dl, P.ringA, 0.35);
+  if (locked) for (const dl of [-6, -3, 3, 6]) ring(X, Y, r21 + dl, P.ringA, 1, 0.35);
   for (let k = 0; k < 160; k++) { const th = k / 160 * 2 * Math.PI, r = rOf(th); dot(X + r * Math.cos(th), Y - r * Math.sin(th), P.probe, 0.7); }
   if (locked && e > 0) {  // the stretched orbit crosses its neighbours: collisions
     for (const dl of [-6, -3, 3, 6]) {
@@ -1083,7 +865,7 @@ function dropCassini(plt, t, s, e8) {
     const a = hash(k) * 6.283 + omega(R21) * TF_ORB * 0.25 * t, r = cd0 + (cd1 - cd0) * (0.5 + 0.5 * Math.sin(t * (2 + hash(k + 9) * 3) + k));
     if (hash(k * 3 + s) < 0.35 + 0.5 * ke) pset(X + r * Math.cos(a), Y - r * Math.sin(a), ke > 0.5 ? P.white : P.kick);
   }
-  ring(X, Y, MOON.mimas.a / RES_SC, P.mimas, 0.3);
+  ring(X, Y, MOON.mimas.a / RES_SC, P.mimas, 1, 0.3);
   const m = { mx: X + MOON.mimas.a / RES_SC * Math.cos(aM), my: Y - MOON.mimas.a / RES_SC * Math.sin(aM) };
   drawMimas(m);
   return { title: 'CASSINI DIVISION',
@@ -1168,7 +950,7 @@ function dropAll(plt, t, s, e8) {
     const r = MOON[k].a / ALL_SC, a = j * 1.9 + omega(MOON[k].a) * tf * t;
     return { k, lab, col: P[k], x: X + r * Math.cos(a), y: Y - r * Math.sin(a) * TILT, back: Math.sin(a) > 0 };
   });
-  for (const k of ['mimas', 'janus']) ring(X, Y, MOON[k].a / ALL_SC, P[k], 0.2, TILT);
+  for (const k of ['mimas', 'janus']) ring(X, Y, MOON[k].a / ALL_SC, P[k], 1, 0.2, TILT);
   const rp = R_SAT / ALL_SC, hidden = m => m.back && ((m.x - X) / rp) ** 2 + ((m.y - Y) / (rp * 0.9)) ** 2 < 1;
   drawRings(X, Y, ALL_SC, TILT, -1);
   for (const m of ms) if (m.back) fillCircle(m.x, m.y, m.k === 'mimas' ? 2 : 1, m.col);
@@ -1211,22 +993,7 @@ function sceneOutro(lt, t, sec) {
 const SCENES = { title: sceneTitle, orbits: sceneOrbits, moon: sceneMoon, wakes: sceneWakes, shep: sceneShep, res: sceneRes,
                  build: sceneBuild, drop: sceneDrop, outro: sceneOutro };
 
-// ---------- main loop ----------
-function frame() {
-  const started = !!ac;
-  let tau = 0;
-  if (started) tau = Math.max(0, ac.currentTime - T0 - (ac.outputLatency || 0));
-  else if (DEBUG_T !== null) tau = DEBUG_T;
-  if (started || DEBUG_T !== null) draw(tau);
-  else {
-    cx.setTransform(1, 0, 0, 1, 0, 0);
-    cx.fillStyle = P.bg; cx.fillRect(0, 0, W, H);
-    sceneTitle(0, performance.now() / 1000, { started });
-  }
-  if (started && ac.state === 'suspended') card([{ t: 'PAUSED', c: P.kick, s: 2 }], 150);
-  requestAnimationFrame(frame);
-}
-
+// ---------- one frame at song time tau; the engine's main loop calls it ----------
 function draw(tau) {
   const t = tau % LOOP;
   const bar = Math.floor(t / BAR), sec = SONG[BAR_SEC[bar]], lt = t - sec.start * BAR;
@@ -1249,22 +1016,12 @@ function draw(tau) {
   if (D && !CALM && pl < 0.3) ditherFill(P.white, 0.8 * (1 - pl / 0.3));
 }
 
-// video export (scene-to-short): one loop of frames and audio, rendered offline on the same clock
-window.__capture = {
-  duration: LOOP,
+Engine.run({
+  clock, buildGraph, voices, draw,
+  title: sceneTitle,
+  paused: P.kick,
   thumb: SONG.find(s => s.id === 'drop').start * BAR + 2 * BAR + 6 * STEP,
-  frame: tau => draw(tau),
-  async audio(sr = 48000) {
-    const live = ac;
-    ac = new OfflineAudioContext(2, Math.round(LOOP * sr), sr);
-    buildGraph(); master.gain.value = 0.9;
-    for (let s = 0; s < TOTAL_STEPS; s++) playStep(s, s * STEP);
-    const buf = await ac.startRendering();
-    ac = live;
-    return { sampleRate: sr, L: buf.getChannelData(0), R: buf.getChannelData(1) };
-  },
-};
-frame();
+});
 })();
 </script>
 </body>

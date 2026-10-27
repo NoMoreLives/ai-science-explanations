@@ -5,27 +5,21 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>55 Cancri e: Atmospheric DnB Mix</title>
 <link rel="icon" type="image/svg+xml" href="icon.svg">
-<style>
-  html,body{margin:0;height:100%;background:#020108;color:#6f6aa6;font:12px monospace}
-  body{display:flex;flex-direction:column;align-items:center;justify-content:center}
-  canvas{height:min(92vh,calc(100vw*16/9));aspect-ratio:9/16;image-rendering:pixelated;cursor:pointer;background:#05030b}
-  p{margin:6px 16px 0;text-align:center}
-</style>
+<link rel="stylesheet" href="../engine/engine.css">
 </head>
 <body>
 <canvas id="c" width="180" height="320"></canvas>
 <p>click / space: play-pause &middot; m: mute &middot; headphones + volume up &middot; ?bpm=172 &amp;per=17.68 (orbit, hours: retunes the track) &amp;calm=1 (no shake/flash)</p>
+<script src="../engine/engine.js"></script>
 <script>
 (() => {
 'use strict';
 
 // ---------- config ----------
-const q = new URLSearchParams(location.search);
-const num = (k, d, lo, hi) => { const n = parseFloat(q.get(k)); return n >= lo && n <= hi ? n : d; };
+const { W, H } = Engine;
+const { clamp, smooth } = Engine.math;
+const { num, CALM, SHORT } = Engine.params;
 const BPM = num('bpm', 172, 160, 180);
-const CALM = q.get('calm') === '1';       // no screen shake or flashes
-const SHORT = q.get('short') === '1';     // YouTube Short: a hit on the first frame
-const DEBUG_T = q.has('t') ? parseFloat(q.get('t')) : null; // freeze visuals at t seconds (no audio)
 
 // 55 Cancri e ("Janssen"), approximate published values. Every number drawn on screen comes from these.
 const PL = {
@@ -71,12 +65,7 @@ const midi = m => TUNE_HZ * Math.pow(2, (m - 60) / 12);
 const NOTE = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
 const NOTE_F = 69 + 12 * Math.log2(TUNE_HZ / 440), KEY = NOTE[((Math.round(NOTE_F) % 12) + 12) % 12], CENTS = (NOTE_F - Math.round(NOTE_F)) * 100;
 
-const W = 180, H = 320, X = 90, OY = 112;
-const STEP = 60 / BPM / 4, BAR = STEP * 16, BEAT = STEP * 4;
-// on screen the planet laps its star once every 2 bars
-const ORBIT_BARS = 2, ORBIT_LEN = ORBIT_BARS * BAR, SPEEDUP = ORBIT_S / ORBIT_LEN;
-const orbPhase = t => ((t / ORBIT_LEN) % 1 + 1) % 1;
-const orbAng = t => -Math.PI / 2 + 2 * Math.PI * orbPhase(t);
+const X = 90, OY = 112;
 
 // the track: one section per stage, each introducing one layer
 const SONG = [
@@ -90,10 +79,13 @@ const SONG = [
   { id: 'drop', bars: 32 },    // everything + reese + vox: Janssen, diamond?, JWST, vs Earth
   { id: 'outro', bars: 4 },    // pad + bells
 ];
-const BAR_SEC = [];
-{ let a = 0; SONG.forEach((s, k) => { s.start = a; s.k = k; a += s.bars; for (let b = 0; b < s.bars; b++) BAR_SEC.push(k); }); }
-const TOTAL_STEPS = BAR_SEC.length * 16;
-const LOOP = TOTAL_STEPS * STEP;
+const clock = Engine.clock(BPM, SONG);
+const { STEP, BAR, BEAT, BAR_SEC, LOOP, at, lb } = clock;
+
+// on screen the planet laps its star once every 2 bars
+const ORBIT_BARS = 2, ORBIT_LEN = ORBIT_BARS * BAR, SPEEDUP = ORBIT_S / ORBIT_LEN;
+const orbPhase = t => ((t / ORBIT_LEN) % 1 + 1) % 1;
+const orbAng = t => -Math.PI / 2 + 2 * Math.PI * orbPhase(t);
 
 // C minor: Cm9 Abmaj7 Ebmaj7 Bb6/9
 const ROOT = [36, 32, 39, 34];
@@ -107,11 +99,6 @@ const BRK = ['K.g.S..g..K.S..g', 'K.g.S..g.gK.S.g.', 'K.g.S..g..K.S..g', 'K.g.S.
 const HATV = [0.5, 0.2, 0.7, 0.25, 0.5, 0.2, 0.7, 0.3, 0.5, 0.2, 0.7, 0.25, 0.5, 0.3, 0.7, 0.4];
 const SUBN = [0, -1, -1, -1, -1, -1, -1, -1, -1, -1, 0, -1, -1, -1, 7, -1];
 
-function at(s) {
-  s = ((s % TOTAL_STEPS) + TOTAL_STEPS) % TOTAL_STEPS;
-  const bar = (s / 16) | 0, sec = SONG[BAR_SEC[bar]];
-  return { s, sec, id: sec.id, lb: bar - sec.start, i: s % 16 };
-}
 // the silent beat before the drop
 const hushAt = s => { const { id, lb, i } = at(s); return id === 'crush' && lb === 3 && i >= 12; };
 
@@ -171,13 +158,11 @@ function hit(layer, s) {
   }
   return 0;
 }
-
-const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
-const smooth = x => { x = clamp(x, 0, 1); return x * x * (3 - 2 * x); };
+const { pulse, last, countdown, sequencer } = Engine.envelopes(hit, clock);
 
 // one colour per instrument, kept for the whole track
 const P = {
-  bg: '#05030b', grid: '#140d22', edge: '#33284f', dim: '#9088b8', fg: '#f4eeff', shadow: '#000000', white: '#ffffff',
+  ...Engine.NEUTRALS,
   pad: '#ffb547', padD: '#5a3a10', padL: '#ffe0a0',      // the star, amber (a 5200 K K-dwarf)
   brk: '#a8b4ff', brkD: '#2e3466',                       // the orbit, periwinkle
   sub: '#ff4a2a', subD: '#5e1408', subL: '#ff9a70',      // lava, red
@@ -191,127 +176,11 @@ const STAR = [P.pad, '#d9741e', P.pad, P.padL];
 const CYC = [P.pad, P.brk, P.sub, P.hat, P.bel, P.fx];
 
 // ---------- canvas + gfx helpers ----------
-const cv = document.getElementById('c');
-const cx = cv.getContext('2d');
-cx.imageSmoothingEnabled = false;
+const { cx, textW, text, card, bay, fillCircle, ditherCircle, ring, line, dot, ditherFill, sun, banner, fact } = Engine.gfx(P);
+const { mulberry, hash } = Engine.rand;
 
-// 3x5 pixel font, rows top to bottom
-const FONT = {
-  A:'010 101 111 101 101', B:'110 101 110 101 110', C:'011 100 100 100 011', D:'110 101 101 101 110',
-  E:'111 100 110 100 111', F:'111 100 110 100 100', G:'011 100 101 101 011', H:'101 101 111 101 101',
-  I:'111 010 010 010 111', J:'001 001 001 101 010', K:'101 101 110 101 101', L:'100 100 100 100 111',
-  M:'101 111 111 101 101', N:'110 101 101 101 101', O:'010 101 101 101 010', P:'110 101 110 100 100',
-  Q:'010 101 101 111 011', R:'110 101 110 101 101', S:'011 100 010 001 110', T:'111 010 010 010 010',
-  U:'101 101 101 101 111', V:'101 101 101 101 010', W:'101 101 111 111 101', X:'101 101 010 101 101',
-  Y:'101 101 010 010 010', Z:'111 001 010 100 111',
-  0:'111 101 101 101 111', 1:'010 110 010 010 111', 2:'110 001 010 100 111', 3:'110 001 010 001 110',
-  4:'101 101 111 001 001', 5:'111 100 110 001 110', 6:'011 100 111 101 111', 7:'111 001 010 010 010',
-  8:'111 101 111 101 111', 9:'111 101 111 001 110',
-  '-':'000 000 111 000 000', '.':'000 000 000 000 010', ':':'000 010 000 010 000',
-  '=':'000 111 000 111 000', '+':'000 010 111 010 000', '!':'010 010 010 000 010', '?':'110 001 010 000 010',
-  '>':'100 010 001 010 100', '<':'001 010 100 010 001', '/':'001 001 010 100 100', ',':'000 000 000 010 100',
-  '(':'010 100 100 100 010', ')':'010 001 001 001 010', "'":'010 010 000 000 000', '~':'000 011 110 000 000',
-  '^':'010 101 000 000 000', '#':'101 111 101 111 101', '%':'101 001 010 100 101',
-};
-const GL = {};
-for (const k in FONT) GL[k] = FONT[k].replace(/ /g, '');
-
-const textW = (s, sc) => s.length * 4 * sc - sc;
-function text(s, x, y, col, sc = 1, align = 'l') {
-  s = String(s).toUpperCase();
-  if (align === 'c') x = Math.round(x - textW(s, sc) / 2);
-  else if (align === 'r') x -= textW(s, sc);
-  cx.fillStyle = col;
-  for (let i = 0; i < s.length; i++) {
-    const g = GL[s[i]];
-    if (!g) continue;
-    for (let k = 0; k < 15; k++) {
-      if (g[k] === '1') cx.fillRect(x + i * 4 * sc + (k % 3) * sc, y + ((k / 3) | 0) * sc, sc, sc);
-    }
-  }
-}
-
-// bordered caption box; lines = [{t, c, s}]
-function card(lines, y, cxp = 90, border = P.fg) {
-  let w = 0, h = 4;
-  for (const l of lines) { const s = l.s || 1; w = Math.max(w, textW(String(l.t), s)); h += 5 * s + 3; }
-  w += 10;
-  if (w > W) console.warn('card too wide:', lines.map(l => l.t).join(' / '));
-  const x = Math.round(cxp - w / 2);
-  cx.fillStyle = P.shadow; cx.fillRect(x + 2, y + 2, w, h);
-  cx.fillStyle = P.bg;     cx.fillRect(x, y, w, h);
-  cx.fillStyle = border;
-  cx.fillRect(x, y, w, 1); cx.fillRect(x, y + h - 1, w, 1);
-  cx.fillRect(x, y, 1, h); cx.fillRect(x + w - 1, y, 1, h);
-  let ty = y + 4;
-  for (const l of lines) { const s = l.s || 1; text(l.t, cxp, ty, l.c || P.fg, s, 'c'); ty += 5 * s + 3; }
-  return h;
-}
-
-const BAYER = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
-const bay = (x, y) => BAYER[(y & 3) * 4 + (x & 3)];
-
-function fillCircle(x, y, r, col) {
-  if (r < 0) return;
-  cx.fillStyle = col;
-  for (let dy = -r; dy <= r; dy++) {
-    const dx = Math.floor(Math.sqrt((r + .5) * (r + .5) - dy * dy));
-    cx.fillRect(x - dx, y + dy, 2 * dx + 1, 1);
-  }
-}
-
-// ordered-dither ring/disc, d = 0..1 density
-function ditherCircle(x, y, r0, r1, col, d) {
-  if (d <= 0) return;
-  x = Math.round(x); y = Math.round(y); r1 = Math.round(r1);
-  cx.fillStyle = col;
-  const lvl = d * 16;
-  for (let py = Math.max(0, y - r1); py <= Math.min(H - 1, y + r1); py++) {
-    for (let px = Math.max(0, x - r1); px <= Math.min(W - 1, x + r1); px++) {
-      const dd = (px - x) ** 2 + (py - y) ** 2;
-      if (dd <= r1 * r1 && dd >= r0 * r0 && bay(px, py) < lvl) cx.fillRect(px, py, 1, 1);
-    }
-  }
-}
-
-// filled dithered ellipse, semi-axes a, b, rotated by rot; r0 = inner cut-out (0..1) for rims
-function dEllipse(x, y, a, b, rot, col, d, r0 = 0) {
-  if (d <= 0 || a < 1 || b < 0.5) return;
-  x = Math.round(x); y = Math.round(y);
-  const c = Math.cos(rot), s = Math.sin(rot), m = Math.ceil(Math.max(a, b)), lvl = d * 16, r2 = r0 * r0;
-  cx.fillStyle = col;
-  for (let py = Math.max(-m, -y); py <= Math.min(m, H - 1 - y); py++) {
-    for (let px = Math.max(-m, -x); px <= Math.min(m, W - 1 - x); px++) {
-      const u = (px * c + py * s) / a, v = (py * c - px * s) / b, qq = u * u + v * v;
-      if (qq <= 1 && qq >= r2 && bay(x + px, y + py) < lvl) cx.fillRect(x + px, y + py, 1, 1);
-    }
-  }
-}
 // distance from the centre to an ellipse's edge in direction th
 const ellR = (th, a, b, rot) => { const c = Math.cos(th - rot), s = Math.sin(th - rot); return 1 / Math.sqrt((c / a) ** 2 + (s / b) ** 2); };
-
-// thin dithered ring, sampled by angle; sy squashes it into an ellipse
-function ring(x, y, r, col, th, d, sy = 1) {
-  if (d <= 0 || r < 1) return;
-  cx.fillStyle = col;
-  const lvl = d * 16, n = Math.ceil(r * 7) + 8;
-  for (let k = 0; k < n; k++) {
-    const a = k / n * 2 * Math.PI, c = Math.cos(a), s = Math.sin(a);
-    for (let j = 0; j < th; j++) {
-      const px = Math.round(x + c * (r + j)), py = Math.round(y + s * (r + j) * sy);
-      if (px >= 0 && px < W && py >= 0 && py < H && bay(px, py) < lvl) cx.fillRect(px, py, 1, 1);
-    }
-  }
-}
-
-function line(x0, y0, x1, y1, col, d = 1) {
-  cx.fillStyle = col;
-  const n = Math.max(Math.abs(x1 - x0), Math.abs(y1 - y0), 1);
-  for (let k = 0; k <= n; k++) {
-    const px = Math.round(x0 + (x1 - x0) * k / n), py = Math.round(y0 + (y1 - y0) * k / n);
-    if (d >= 1 || bay(px, py) < d * 16) cx.fillRect(px, py, 1, 1);
-  }
-}
 
 function arrow(x0, y0, x1, y1, col) {
   line(x0, y0, x1, y1, col);
@@ -319,49 +188,7 @@ function arrow(x0, y0, x1, y1, col) {
   for (const s of [-1, 1]) line(x1, y1, x1 + 4 * Math.cos(a + s * 2.5), y1 + 4 * Math.sin(a + s * 2.5), col);
 }
 
-function dot(px, py, col, d) {
-  px = Math.round(px); py = Math.round(py);
-  if (bay(px, py) < d * 16) { cx.fillStyle = col; cx.fillRect(px, py, 1, 1); }
-}
-
-// dithered pattern fills: d of a 4x4 tile in col (cached)
-const PAT = {};
-function ditherFill(col, d) {
-  const n = Math.max(0, Math.min(16, Math.round(d * 16)));
-  if (!n) return;
-  const key = col + n;
-  if (!PAT[key]) {
-    const t = document.createElement('canvas'); t.width = t.height = 4;
-    const c = t.getContext('2d'); c.fillStyle = col;
-    for (let i = 0; i < 16; i++) if (BAYER[i] < n) c.fillRect(i % 4, (i / 4) | 0, 1, 1);
-    PAT[key] = cx.createPattern(t, 'repeat');
-  }
-  cx.fillStyle = PAT[key]; cx.fillRect(0, 0, W, H);
-}
-
-function mulberry(a) { return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
 const rng = mulberry(55);
-const hash = n => { n = Math.imul(n ^ 0x5bd1e995, 0x27d4eb2d); n ^= n >>> 15; n = Math.imul(n, 0x85ebca6b); n ^= n >>> 13; return (n >>> 0) / 4294967296; };
-
-// a star: dithered corona, limb, body, hot spot and boiling granulation
-function sun(x, y, r, pal, t, glow = 0.35) {
-  r = Math.max(1, Math.round(r));
-  ditherCircle(x, y, r, Math.round(r * 1.3) + 4, pal[0], glow);
-  fillCircle(x, y, r, pal[1]);
-  if (r < 3) return;
-  fillCircle(x, y, r - 2, pal[2]);
-  fillCircle(x - Math.round(r * 0.22), y - Math.round(r * 0.22), Math.round(r * 0.5), pal[3]);
-  if (r < 6) return;
-  cx.fillStyle = pal[1];
-  const rr = (r - 2) * (r - 2), sc = 6 / r + 0.25;
-  for (let py = -r + 2; py <= r - 2; py++) {
-    for (let px = -r + 2; px <= r - 2; px++) {
-      if (px * px + py * py > rr) continue;
-      const v = Math.sin(px * sc * 1.7 + t * 1.9) * Math.sin(py * sc * 2.1 - t * 1.3) + Math.sin((px - py) * sc + t * 0.7) * 0.6;
-      if (v > 0.95 && bay(x + px, y + py) < 8) cx.fillRect(x + px, y + py, 1, 1);
-    }
-  }
-}
 
 const STARS = Array.from({ length: 140 }, () => ({ x: rng() * W | 0, y: rng() * H | 0, b: rng() }));
 const starCol = (k, t, s) => (k * 7 + Math.floor(t * 6)) % 11 === 0 ? P.fg : s.b > 0.6 ? P.dim : P.edge;
@@ -453,18 +280,8 @@ function kickShells(t, s, x0, y0, r0 = 10) {
 }
 
 // ---------- text helpers ----------
-function fmtNum(v) { return v >= 10 ? String(Math.round(v)) : v >= 1 ? String(Math.round(v * 10) / 10) : String(parseFloat(v.toPrecision(2))); }
-function fmtBig(v) {
-  if (v >= 1e12) return fmtNum(v / 1e12) + ' TRILLION';
-  if (v >= 1e9) return fmtNum(v / 1e9) + ' BILLION';
-  if (v >= 1e6) return fmtNum(v / 1e6) + ' MILLION';
-  if (v >= 1e3) return Math.round(v).toLocaleString('en-US');
-  return fmtNum(v);
-}
-const rough = v => { if (v <= 0) return '0'; const e = Math.pow(10, Math.floor(Math.log10(v)) - 1); return fmtBig(Math.round(v / e) * e); }; // 2 significant figures
+const { fmtNum, fmtBig, rough } = Engine.fmt;
 const HRS = PL.periodH.toFixed(1);
-const banner = (title, sub, col, subCol = P.fg) => card([{ t: title, s: 2, c: col }, { t: sub, c: subCol }], 4, 90, col);
-const fact = (lines, border) => card(lines.map(l => typeof l === 'string' ? { t: l } : l), 200, 90, border);
 const timeline = s => { const w = textW(s, 1) + 6; cx.fillStyle = P.bg; cx.fillRect(90 - (w >> 1), 242, w, 9); text(s, 90, 244, P.dim, 1, 'c'); };
 // text with a 1px black outline, for labels sitting on glowing things
 function label(s, x, y, col, align = 'l') {
@@ -473,54 +290,25 @@ function label(s, x, y, col, align = 'l') {
 }
 
 // ---------- audio (everything synthesised) ----------
-let ac = null, master, secGain, comp, duck, brkIn, subIn, reeseIn, padIn, keysIn, belIn, voxIn, percIn, fxSend, revSend;
-let sq125, sq25, sq50, noiseBuf, T0 = 0, muted = false, step = 0;
+const { ctx, track, G, F, chain, pan, osc, env, play, noise, noiseSource } = Engine.audio;
+let master, secGain, comp, duck, brkIn, subIn, reeseIn, padIn, keysIn, belIn, voxIn, percIn, fxSend, revSend;
 
 // every node made while one step is being scheduled; all are disconnected once that step's last sound ends
 // (Chrome tidies finished notes up by itself, Safari keeps processing them and slows to a crawl)
-let bag = null;
-const track = n => { if (bag) bag.push(n); return n; };
-const G = v => { const g = track(ac.createGain()); g.gain.value = v; return g; };
-const F = (type, f, Q = 0.7) => { const b = track(ac.createBiquadFilter()); b.type = type; b.frequency.value = f; b.Q.value = Q; return b; };
-const chain = (...n) => { for (let i = 0; i < n.length - 1; i++) n[i].connect(n[i + 1]); return n[0]; };
-const pan = v => { const p = track(ac.createStereoPanner()); p.pan.value = v; return p; };
 
-function pulseWave(d) {
-  const N = 64, re = new Float32Array(N), im = new Float32Array(N);
-  for (let n = 1; n < N; n++) {
-    const a = 2 / (n * Math.PI);
-    re[n] = a * Math.sin(n * Math.PI * d) * Math.cos(n * Math.PI * d);
-    im[n] = a * Math.sin(n * Math.PI * d) ** 2;
-  }
-  return ac.createPeriodicWave(re, im);
-}
 function shaper(fn) {
   const n = 2048, c = new Float32Array(n);
   for (let i = 0; i < n; i++) c[i] = fn(i / (n - 1) * 2 - 1);
-  const s = ac.createWaveShaper(); s.curve = c; s.oversample = '2x';
+  const s = ctx().createWaveShaper(); s.curve = c; s.oversample = '2x';
   return s;
 }
 
-function osc(wave, f, t) {
-  const o = track(ac.createOscillator());
-  if (typeof wave === 'string') o.type = wave; else o.setPeriodicWave(wave);
-  o.frequency.setValueAtTime(f, t);
-  return o;
-}
-function env(g, t, vol, atk, dur, hold) {
-  g.gain.setValueAtTime(0.0001, t);
-  g.gain.linearRampToValueAtTime(vol, t + atk);
-  if (hold) { g.gain.setValueAtTime(vol, t + dur * hold); }
-  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-}
-function play(o, t, dur) { o.start(t); o.stop(t + dur + 0.03); }
-
-function buildGraph() {
-  master = G(0.0001);
+function buildGraph(ac, out) {
+  master = out;
   comp = ac.createDynamicsCompressor();
   comp.threshold.value = -14; comp.knee.value = 6; comp.ratio.value = 5; comp.attack.value = 0.003; comp.release.value = 0.12;
   secGain = G(0.8); // section level: the drop gets the headroom
-  chain(comp, secGain, master, ac.destination);
+  chain(comp, secGain, master);
   // sidechain bus: pad, keys, sub, reese and vox pump against the kick
   duck = G(1); duck.connect(comp);
   // ping-pong echo, dotted eighth, each side darker than the last
@@ -568,27 +356,14 @@ function buildGraph() {
   voxIn.connect(G(0.8)).connect(revSend);
   voxIn.connect(G(0.2)).connect(fxSend);
   percIn = G(0.8); percIn.connect(comp);
-  sq125 = pulseWave(0.125); sq25 = pulseWave(0.25); sq50 = pulseWave(0.5);
-  noiseBuf = ac.createBuffer(1, ac.sampleRate, ac.sampleRate);
-  const d = noiseBuf.getChannelData(0);
-  for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
 }
-
-function noise(t, dur, vol, type, f, dest, Q = 0.8) {
-  const s = track(ac.createBufferSource()); s.buffer = noiseBuf;
-  const b = F(type, f, Q), g = G(1);
-  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-  chain(s, b, g, dest);
-  s.start(t, Math.random() * 0.5); s.stop(t + dur + 0.03);
-}
-
 // DnB kick: short, punchy pitch dive with a pulse click; ducks the melodic bus
 function kick(t, vel) {
   const o = osc('sine', 170, t), g = G(1);
   o.frequency.exponentialRampToValueAtTime(50, t + 0.08);
   env(g, t, vel, 0.001, 0.3, 0.25);
   chain(o, g, brkIn); play(o, t, 0.3);
-  const c = osc(sq50, 1600, t), cg = G(1); env(cg, t, vel * 0.2, 0.0005, 0.01);
+  const c = osc(0.5, 1600, t), cg = G(1); env(cg, t, vel * 0.2, 0.0005, 0.01);
   chain(c, cg, brkIn); play(c, t, 0.01);
   duck.gain.setValueAtTime(0.4, t);
   duck.gain.setTargetAtTime(1, t + 0.02, 0.08);
@@ -604,14 +379,7 @@ function snare(t, vel) {
   if (vel > 0.5) noise(t, 0.3, 0.14 * vel, 'bandpass', 2400, revSend, 0.6);
 }
 
-// 808-style metal: six detuned squares, bandpassed; ride, hats and the crash are all made of this
-const METAL = [205.3, 304.4, 369.6, 522.7, 540, 800];
-function metal(t, dur, vol, hp, p = 0, dest = percIn) {
-  const bp = F('bandpass', 10000, 0.9), g = G(1);
-  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-  chain(bp, F('highpass', hp), g, pan(p), dest);
-  for (const f of METAL) { const o = osc('square', f * 1.6, t); o.connect(bp); play(o, t, dur); }
-}
+const metal = (t, dur, vol, hp, p = 0, dest = percIn) => Engine.audio.metal(t, dur, vol, hp, p, dest);
 const ride = t => metal(t, 0.5, 0.08, 5000, 0.25);
 const hat = (t, vel, p) => metal(t, 0.02 + vel * 0.03, 0.05 + 0.13 * vel, 8000, p);
 const crash = t => { metal(t, 1.8, 0.28, 4000, -0.3); metal(t + 0.002, 1.6, 0.2, 5000, 0.3, revSend); noise(t, 1.4, 0.14, 'highpass', 6000, percIn); };
@@ -633,7 +401,7 @@ function reese(t, m, dur) {
   lp.frequency.setValueAtTime(250, t); lp.frequency.linearRampToValueAtTime(1000, t + dur * 0.5); lp.frequency.linearRampToValueAtTime(320, t + dur);
   env(g, t, 0.5, 0.08, dur, 0.85);
   chain(lp, g, reeseIn);
-  for (const det of [-16, 16]) { const o = osc(sq50, midi(m), t); o.detune.value = det; chain(o, G(0.5), pan(det / 40), lp); play(o, t, dur); }
+  for (const det of [-16, 16]) { const o = osc(0.5, midi(m), t); o.detune.value = det; chain(o, G(0.5), pan(det / 40), lp); play(o, t, dur); }
 }
 // atmospheric pad: each chord tone a triangle + detuned 25% pulse + a thin 12.5% shimmer an octave up, slow swell
 function atmoPad(t, notes, dur, vol) {
@@ -645,7 +413,7 @@ function atmoPad(t, notes, dur, vol) {
   notes.forEach((m, k) => {
     const p = pan((k / (notes.length - 1) - 0.5) * 0.9);
     p.connect(lp);
-    for (const [w, mul, det, v] of [['triangle', 1, 4, 1], [sq25, 1, -9, 0.32], [sq125, 2, 7, 0.12]]) {
+    for (const [w, mul, det, v] of [['triangle', 1, 4, 1], [0.25, 1, -9, 0.32], [0.125, 2, 7, 0.12]]) {
       const o = osc(w, midi(m) * mul, t); o.detune.value = det; chain(o, G(v), p); play(o, t, dur + rel);
     }
   });
@@ -661,7 +429,7 @@ function keys(t, notes, dur, vol) {
     const c = osc('sine', f, t), mo = osc('sine', f, t), mg = G(0);
     mg.gain.setValueAtTime(f * 1.4, t); mg.gain.exponentialRampToValueAtTime(f * 0.12, t + 0.25);
     chain(mo, mg, c.frequency); chain(c, G(0.5), p);
-    const b = osc(sq125, f, t); chain(b, G(0.05), p);
+    const b = osc(0.125, f, t); chain(b, G(0.05), p);
     play(c, t, dur); play(mo, t, dur); play(b, t, dur);
   });
 }
@@ -670,7 +438,7 @@ function bell(t, m, vol, p) {
   const f = midi(m), g = G(1);
   env(g, t, vol, 0.002, 1.1);
   chain(g, pan(p), belIn);
-  for (const [w, mul, v] of [['sine', 1, 1], ['sine', 2.76, 0.3], [sq125, 2, 0.06]]) { const o = osc(w, f * mul, t); chain(o, G(v), g); play(o, t, 1.1); }
+  for (const [w, mul, v] of [['sine', 1, 1], ['sine', 2.76, 0.3], [0.125, 2, 0.06]]) { const o = osc(w, f * mul, t); chain(o, G(v), g); play(o, t, 1.1); }
 }
 // vox: two pulses through "ah" formants (730 + 1150 Hz), slow attack, vibrato fading in
 function vox(t, m, dur, vol) {
@@ -682,14 +450,14 @@ function vox(t, m, dur, vol) {
   const vib = osc('sine', 5.2, t), vg = G(0);
   vg.gain.setValueAtTime(0, t); vg.gain.linearRampToValueAtTime(f * 0.006, t + 0.7);
   chain(vib, vg); play(vib, t, dur + rel);
-  for (const [w, det, a] of [[sq25, -7, 1], [sq50, 7, 0.7]]) {
+  for (const [w, det, a] of [[0.25, -7, 1], [0.5, 7, 0.7]]) {
     const o = osc(w, f, t), og = G(a); o.detune.value = det; vg.connect(o.frequency);
     chain(o, og); og.connect(f1); og.connect(f2); play(o, t, dur + rel);
   }
 }
 // the air: a slow, breathing band of noise under everything
 function air(t, dur, vol) {
-  const s = track(ac.createBufferSource()); s.buffer = noiseBuf; s.loop = true;
+  const s = noiseSource(true);
   const bp = F('bandpass', 400, 0.6), g = G(1);
   bp.frequency.setValueAtTime(350, t); bp.frequency.linearRampToValueAtTime(950, t + dur * 0.5); bp.frequency.linearRampToValueAtTime(350, t + dur);
   g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(vol, t + dur * 0.35); g.gain.linearRampToValueAtTime(0.0001, t + dur);
@@ -703,13 +471,7 @@ function impact(t) {
   env(g, t, 0.75, 0.003, 1.6, 0.15);
   chain(o, g, brkIn); play(o, t, 1.6);
 }
-function riser(t, dur, vol) {
-  const s = track(ac.createBufferSource()); s.buffer = noiseBuf; s.loop = true;
-  const bp = F('bandpass', 400, 3), g = G(1);
-  bp.frequency.setValueAtTime(400, t); bp.frequency.exponentialRampToValueAtTime(11000, t + dur);
-  g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(vol, t + dur - 0.01); g.gain.linearRampToValueAtTime(0.0001, t + dur);
-  chain(s, bp, g, percIn); s.start(t); s.stop(t + dur + 0.02);
-}
+const riser = (t, dur, vol) => Engine.audio.riser(t, dur, vol, percIn);
 // scene change: two falling triangle chimes into the echo
 function chime(t) {
   for (const [f, d] of [[midi(96), 0], [midi(91), 0.07]]) {
@@ -721,15 +483,6 @@ function chime(t) {
 // steps until the next hit of layer (max 16), and the last note before s
 function gapAfter(layer, s) { let n = 1; while (n < 16 && !hit(layer, s + n) && !hushAt(s + n)) n++; return n; }
 function noteBefore(layer, s) { for (let k = 1; k <= 16; k++) { const m = hit(layer, s - k); if (m) return m; } return 0; }
-
-function playStep(s, t) {
-  bag = [];
-  voices(s, t);
-  const nodes = bag, srcs = nodes.filter(n => typeof n.stop === 'function');
-  bag = null;
-  let left = srcs.length;
-  for (const n of srcs) n.onended = () => { if (--left === 0) for (const m of nodes) m.disconnect(); };
-}
 
 function voices(s, t) {
   const { id, lb, i } = at(s), ch = lb % 4, D = id === 'drop', e8 = lb % 8;
@@ -756,106 +509,19 @@ function voices(s, t) {
   if (hit('crash', s)) crash(t);
 }
 
-function schedule() {
-  if (ac.state !== 'running') return;
-  const now = ac.currentTime;
-  while (T0 + step * STEP < now + 0.15) {
-    const t = T0 + step * STEP;
-    if (t > now - 0.02) playStep(step, t); // skip steps missed while the tab was throttled
-    step++;
-  }
-}
-
-function startAudio() {
-  ac = new (window.AudioContext || window.webkitAudioContext)();
-  buildGraph();
-  T0 = ac.currentTime + 0.2; step = 0;
-  setInterval(schedule, 25); schedule();
-  master.gain.setTargetAtTime(muted ? 0.0001 : 0.9, ac.currentTime, 0.2);
-  ac.resume();
-}
-
-// offline render for checking levels without ears: __render(fromBar, bars) -> per-bar peak/rms
-window.__render = async (bar0, bars, sr = 22050) => {
-  ac = new OfflineAudioContext(2, Math.ceil((bars * BAR + 1) * sr), sr);
-  buildGraph(); master.gain.value = 0.9;
-  for (let s = bar0 * 16; s < (bar0 + bars) * 16; s++) playStep(s, 0.05 + (s - bar0 * 16) * STEP);
-  const buf = await ac.startRendering();
-  ac = null;
-  const L = buf.getChannelData(0), out = [];
-  for (let b = 0; b < bars; b++) {
-    let pk = 0, sum = 0, n = 0;
-    for (let i = Math.floor((0.05 + b * BAR) * sr); i < Math.floor((0.05 + (b + 1) * BAR) * sr); i++) { const v = Math.abs(L[i]); pk = Math.max(pk, v); sum += v * v; n++; }
-    const s = SONG[BAR_SEC[bar0 + b]];
-    out.push({ bar: bar0 + b, sec: s.id, lb: bar0 + b - s.start, peak: +pk.toFixed(3), rms: +Math.sqrt(sum / n).toFixed(3) });
-  }
-  return out;
-};
-window.__song = () => SONG.map(s => ({ id: s.id, start: s.start * BAR, bars: s.bars }));
 window.__phys = () => ({ MERC_X, V_KMS, A_KM, STAR_DEG, SUN_DEG, wider: STAR_DEG / SUN_DEG, FLUX, DENS, GRAV, T_EQ, DIAMOND_EARTHS, PRESS_ATM,
   STAR_ORB, ORBIT_HZ, TUNE_HZ, midi60: midi(60), KEY, CENTS, SPEEDUP, loopSec: LOOP, bars: BAR_SEC.length, orbitsPerLoop: BAR_SEC.length / ORBIT_BARS });
-
-function toggle() {
-  if (!ac) { startAudio(); return; }
-  if (ac.state === 'running') ac.suspend(); else ac.resume();
-}
-function toggleMute() {
-  muted = !muted;
-  if (ac) master.gain.setTargetAtTime(muted ? 0.0001 : 0.9, ac.currentTime, 0.1);
-}
-cv.addEventListener('click', toggle);
-addEventListener('keydown', e => {
-  if (e.code === 'Space') { e.preventDefault(); toggle(); }
-  else if (e.key === 'm' || e.key === 'M') toggleMute();
-});
-
-// ---------- visual envelopes, read from the same hit() table ----------
-function since(layer, t, back = 64) {
-  const s = Math.floor(t / STEP);
-  for (let k = 0; k < back; k++) if (hit(layer, s - k)) return t - (s - k) * STEP;
-  return 99;
-}
-const pulse = (layer, t, rate = 10) => Math.exp(-since(layer, t) * rate);
-const lb = lt => Math.floor(lt / BAR);
 
 // ---------- HUD: the live step sequencer + the orbit clock ----------
 const ROWS = [['PAD', 'pads', P.pad, P.padD], ['BRK', 'brk', P.brk, P.brkD], ['SUB', 'subs', P.sub, P.subD],
               ['HAT', 'hats', P.hat, P.hatD], ['BEL', 'bell', P.bel, P.belD], ['FX', 'fx', P.fx, P.fxD]];
-function hud(t) {
-  const s = Math.floor(t / STEP), b0 = s - (s % 16), cur = s % 16, y0 = 257;
-  cx.fillStyle = P.shadow; cx.fillRect(6, y0 - 1, 172, 60);
-  cx.fillStyle = P.bg; cx.fillRect(4, y0 - 3, 172, 60);
-  cx.fillStyle = P.edge;
-  cx.fillRect(4, y0 - 3, 172, 1); cx.fillRect(4, y0 + 56, 172, 1); cx.fillRect(4, y0 - 3, 1, 60); cx.fillRect(175, y0 - 3, 1, 60);
-  ROWS.forEach(([lab, layer, col], r) => {
-    const y = y0 + 1 + r * 9;
-    let active = false;
-    for (let i = 0; i < 16 && !active; i++) if (hit(layer, b0 + i)) active = true;
-    text(lab, 8, y, active ? (pulse(layer, t, 8) > 0.4 ? P.fg : col) : P.edge);
-    for (let i = 0; i < 16; i++) {
-      const on = hit(layer, b0 + i), x = 22 + i * 9;
-      cx.fillStyle = on ? (i === cur ? P.white : col) : active ? P.grid : '#0a0614';
-      cx.fillRect(x, y, 8, 5);
-    }
-  });
-  cx.fillStyle = P.fg; cx.fillRect(22 + cur * 9, y0 + 55, 8, 1); // playhead
-}
+const hud = sequencer(ROWS);
 // where the planet is in its year: the same phase every orbit drawing uses
 function meter(t) {
   const ph = orbPhase(t), n = Math.floor(ph * 18), y = 234;
   text('ORBIT', 4, y, P.brk);
   for (let k = 0; k < 18; k++) { cx.fillStyle = k < n ? P.brk : k === n ? P.white : P.grid; cx.fillRect(26 + k * 5, y, 4, 5); }
   text(`HR ${(ph * PL.periodH).toFixed(1).padStart(4, '0')}/${HRS}`, 176, y, P.fg, 1, 'r');
-}
-
-// big countdown over the last bar of a build; true on the silent beat
-function countdown(lt, sec, ifSilent, x = 90, y = 90) {
-  const bar = lb(lt), beat = Math.floor((lt % BAR) / BEAT);
-  if (bar !== sec.bars - 1) return false;
-  if (beat === 3) { ifSilent(); return true; }
-  const n = String(3 - beat);
-  text(n, x + 2, y + 2, P.shadow, 6, 'c'); text(n, x, y, P.white, 6, 'c');
-  return false;
 }
 
 // ---------- scenes ----------
@@ -1143,22 +809,7 @@ function sceneOutro(lt, t, sec) {
 const SCENES = { star: sceneStar, orbit: sceneOrbit, heat: sceneHeat, lava: sceneLava, diamond: sceneDiamond,
                  crush: sceneCrush, drop: sceneDrop, outro: sceneOutro };
 
-// ---------- main loop ----------
-function frame() {
-  const started = !!ac;
-  let tau = 0;
-  if (started) tau = Math.max(0, ac.currentTime - T0 - (ac.outputLatency || 0));
-  else if (DEBUG_T !== null) tau = DEBUG_T;
-  if (started || DEBUG_T !== null) draw(tau);
-  else {
-    cx.setTransform(1, 0, 0, 1, 0, 0);
-    cx.fillStyle = P.bg; cx.fillRect(0, 0, W, H);
-    sceneTitle(0, performance.now() / 1000, { started });
-  }
-  if (started && ac.state === 'suspended') card([{ t: 'PAUSED', c: P.pad, s: 2 }], 150);
-  requestAnimationFrame(frame);
-}
-
+// ---------- one frame at song time tau; the engine's main loop calls it ----------
 function draw(tau) {
   const t = tau % LOOP;
   const bar = Math.floor(t / BAR), sec = SONG[BAR_SEC[bar]], lt = t - sec.start * BAR;
@@ -1181,22 +832,12 @@ function draw(tau) {
   if (D && !CALM && pl < 0.3) ditherFill(P.white, 0.7 * (1 - pl / 0.3));
 }
 
-// video export (scene-to-short): one loop of frames and audio, rendered offline on the same clock
-window.__capture = {
-  duration: LOOP,
+Engine.run({
+  clock, buildGraph, voices, draw,
+  title: sceneTitle,
+  paused: P.pad,
   thumb: SONG.find(s => s.id === 'drop').start * BAR + 2 * BAR + 6 * STEP,   // two bars into the drop, between kicks (no flash)
-  frame: tau => draw(tau),
-  async audio(sr = 48000) {
-    const live = ac;
-    ac = new OfflineAudioContext(2, Math.round(LOOP * sr), sr);
-    buildGraph(); master.gain.value = 0.9;
-    for (let s = 0; s < TOTAL_STEPS; s++) playStep(s, s * STEP);
-    const buf = await ac.startRendering();
-    ac = live;
-    return { sampleRate: sr, L: buf.getChannelData(0), R: buf.getChannelData(1) };
-  },
-};
-frame();
+});
 })();
 </script>
 </body>

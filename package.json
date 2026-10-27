@@ -1,0 +1,12 @@
+{
+  "name": "8bit-science",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "verify": "node scripts/verify-scene.mjs",
+    "index": "node scripts/build-index.mjs"
+  },
+  "devDependencies": {
+    "playwright-core": "1.49.1"
+  }
+}

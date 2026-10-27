@@ -1,0 +1,699 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Nuclear Pasta: Chip Garage House Mix</title>
+<link rel="icon" type="image/svg+xml" href="icon.svg">
+<link rel="stylesheet" href="../engine/engine.css">
+</head>
+<body>
+<canvas id="c" width="180" height="320"></canvas>
+<p>click / space: play-pause &middot; m: mute &middot; ?bpm=130 &amp;mass=1.4 (suns) &amp;rkm=12 &amp;sigma=0.5 (MeV/fm&sup2;) &amp;np=0.03 (protons/fm&sup3;) &amp;calm=1 (no shake/flash)</p>
+<script src="../engine/engine.js"></script>
+<script>
+(() => {
+'use strict';
+
+// ---------- config ----------
+const { W, H } = Engine;
+const { num, CALM, SHORT } = Engine.params;
+const BPM = num('bpm', 130, 120, 136);
+
+// A neutron star, and the liquid-drop model of the pasta at the bottom of its crust.
+// Every number drawn on screen or heard comes from these.
+const STAR = {
+  mass: num('mass', 1.4, 1, 2.2),         // solar masses
+  rkm: num('rkm', 12, 9, 15),             // radius, km
+  crustKm: 1,                             // the solid crust; the pasta sits at its base
+};
+const PASTA = {
+  sigma: num('sigma', 0.5, 0.2, 1.5),     // nuclear surface tension, MeV/fm^2
+  np: num('np', 0.03, 0.01, 0.08),        // proton density inside the pasta, per fm^3
+  e2: 1.44,                               // e^2 / (4 pi eps0), MeV fm
+  steelX: 1e10,                           // breaking stress vs steel, from molecular-dynamics simulations
+};
+const G_SI = 6.674e-11, M_SUN = 1.989e30, C = 2.998e8;
+const M_KG = STAR.mass * M_SUN, R_M = STAR.rkm * 1e3;
+const RHO = M_KG / (4 / 3 * Math.PI * R_M ** 3);       // mean density, kg/m^3
+const TONNES_CM3 = RHO * 1e-6 / 1000;                  // one cubic centimetre, in tonnes
+const G_X = G_SI * M_KG / R_M ** 2 / 9.81;             // surface gravity vs Earth's
+const V_ESC = Math.sqrt(2 * G_SI * M_KG / R_M) / C;    // escape speed, fraction of light speed
+
+// Liquid-drop pasta (Ravenhall, Pethick & Wilson 1983): pieces of dimension d (3 balls, 2 rods, 1 sheets) fill a
+// fraction w of space. Surface energy d w sigma / r against the protons' Coulomb push 2 pi (np e)^2 r^2 w f_d(w):
+// minimising over r gives the piece size and the energy. Past half full the holes are the pieces (w = 1 - u).
+const fd = (d, w) => d === 2 ? (Math.log(1 / w) - 1 + w) / 4 : (2 / (d - 2) * (1 - d / 2 * w ** (1 - 2 / d)) + w) / (d + 2);
+const PH = [   // name, dimension, hole?, colour layer
+  { name: 'GNOCCHI', d: 3, hole: 0, col: 'org' },
+  { name: 'SPAGHETTI', d: 2, hole: 0, col: 'bass' },
+  { name: 'LASAGNA', d: 1, hole: 0, col: 'pad' },
+  { name: 'BUCATINI', d: 2, hole: 1, col: 'vox' },
+  { name: 'SWISS CHEESE', d: 3, hole: 1, col: 'vox' },
+];
+const piece = (k, u) => PH[k].hole ? 1 - u : u;
+// energy per volume, MeV/fm^3, and the size r (ball/rod radius, half the sheet thickness), fm
+const energy = (k, u) => { const { d } = PH[k], w = piece(k, u); return 3 * w * Math.cbrt(Math.PI * d * d * PASTA.sigma ** 2 * PASTA.np ** 2 * PASTA.e2 * fd(d, w) / 2); };
+const rOpt = (k, u) => { const { d } = PH[k]; return Math.cbrt(d * PASTA.sigma / (4 * Math.PI * PASTA.np ** 2 * PASTA.e2 * fd(d, piece(k, u)))); };
+// the repeating cell that holds one piece, fm
+const cellFm = (k, u) => { const { d } = PH[k], w = piece(k, u), r = rOpt(k, u); return d === 3 ? r * Math.cbrt(4 * Math.PI / (3 * w)) : d === 2 ? r * Math.sqrt(Math.PI / w) : 2 * r / w; };
+const winner = u => { let b = 0; for (let k = 1; k < PH.length; k++) if (energy(k, u) < energy(b, u)) b = k; return b; };
+// filling fractions where the next shape takes over (bisection on equal energy)
+const T = [0];
+for (let k = 1; k < PH.length; k++) {
+  let lo = 0.01, hi = 0.99;
+  for (let n = 0; n < 50; n++) { const m = (lo + hi) / 2; if (energy(k, m) < energy(k - 1, m)) hi = m; else lo = m; }
+  T.push((lo + hi) / 2);
+}
+T.push(1);
+const MID = PH.map((_, k) => (T[k] + T[k + 1]) / 2);   // the middle of each shape's range
+const pct = u => `${Math.round(u * 100)}%`;
+
+const X = 90, Y = 112;
+
+// the track: one section per pasta shape, each introducing one layer
+const SONG = [
+  { id: 'title', bars: 2 },
+  { id: 'squeeze', bars: 8 },     // layer 1: kick + swung hats + clap
+  { id: 'gnocchi', bars: 8 },     // layer 2: organ stabs
+  { id: 'spaghetti', bars: 8 },   // layer 3: sliding sub bass
+  { id: 'lasagna', bars: 8 },     // layer 4: pad chords
+  { id: 'cheese', bars: 8 },      // layer 5: vocal chops
+  { id: 'build', bars: 4 },       // snare roll, riser, the energy race
+  { id: 'drop', bars: 32 },       // everything: the squeeze through every shape
+  { id: 'outro', bars: 4 },       // pad alone
+];
+const clock = Engine.clock(BPM, SONG);
+const { STEP, BAR, BEAT, BAR_SEC, LOOP, at, secDur, lb } = clock;
+const SWING = 0.18;   // garage shuffle: every second 16th is late by this many steps
+
+// F minor: Fm9 Dbmaj9 Bbm9 Csus7
+const ROOT = [41, 37, 34, 36];
+const CHORD = [[56, 60, 63, 67], [56, 60, 63, 65], [53, 56, 60, 61], [55, 58, 60, 65]];
+const VOXM = [[72, 75, 72, 68], [72, 77, 75, 72], [73, 77, 72, 68], [70, 72, 67, 65]];
+const VOX_AT = [2, 6, 9, 14];
+const VOWEL = ['oo', 'ah', 'oh', 'ee'];
+const ORG = [1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0, 0, 0];      // 3-3-4-2-4 organ stabs
+const BASSP = { 0: 0, 3: 0, 6: 12, 10: 0, 13: 7 };                 // 2-step sub line, semitones over the root
+const TWO_STEP = i => i === 0 || i === 10;                         // the skippy garage kick, for the inside-out part
+
+// the drop squeezes on through every shape: filling fraction from bar 0..32, crossing a boundary at each part
+const DROP_U = [[0, 0.04], [8, T[1]], [16, T[2]], [24, T[3]], [28, T[4]], [32, 0.96]];
+function dropU(bar) {
+  for (let k = 1; k < DROP_U.length; k++) {
+    const [b0, u0] = DROP_U[k - 1], [b1, u1] = DROP_U[k];
+    if (bar <= b1) return u0 + (u1 - u0) * (bar - b0) / (b1 - b0);
+  }
+  return 0.96;
+}
+
+// the silent beat before the drop
+const hushAt = s => { const { id, lb, i } = at(s); return id === 'build' && lb === 3 && i >= 12; };
+
+// single source of truth for what plays on step s: audio, HUD and visuals all read this
+function hit(layer, s) {
+  const { id, lb, i } = at(s), ch = lb % 4, D = id === 'drop', e8 = lb % 8, part = lb >> 3;
+  const roll = D && e8 === 7 && i >= 12 && lb !== 31;   // snare fill into the next part
+  const groove = id === 'gnocchi' || id === 'spaghetti' || id === 'lasagna' || id === 'cheese';
+  const early = id === 'build' && lb < 2;
+  switch (layer) {
+    case 'kick':
+      if (id === 'squeeze') return lb < 2 ? (i === 0 || i === 8 ? 1 : 0) : i % 4 === 0 ? 1 : 0;
+      if (groove || early) return i % 4 === 0 ? 1 : 0;
+      if (D) return roll ? 0 : part === 3 ? (TWO_STEP(i) || (lb % 2 && i === 7) ? 1 : 0) : i % 4 === 0 ? 1 : 0;
+      if (id === 'outro') return lb === 0 && i === 0 ? 1 : 0;
+      return 0;
+    case 'hat':   // 1 = open off-beat, less = closed shuffle
+      if ((id === 'squeeze' && lb >= 2) || groove || early || (D && !roll)) return i % 4 === 2 ? 1 : i % 2 ? 0.5 : 0;
+      return 0;
+    case 'clap': return ((id === 'squeeze' && lb >= 4) || groove || early || (D && !roll)) && (i === 4 || i === 12) ? 1 : 0;
+    case 'snare':
+      if (id === 'build' && lb >= 2) return hushAt(s) || (lb === 2 && i % 2) ? 0 : 0.4 + 0.6 * ((lb - 2) * 16 + i) / 28;
+      return roll ? 0.6 + 0.1 * (i - 12) : 0;
+    case 'org':
+      if (id === 'gnocchi' && lb < 2) return i === 3 || i === 10 ? ch + 1 : 0;
+      if (groove || (id === 'build' && lb < 3) || D) return ORG[i] ? ch + 1 : 0;
+      return 0;
+    case 'bass':
+      if (id === 'spaghetti' && lb < 2) return i === 0 || i === 8 ? ROOT[ch] + (i ? 12 : 0) : 0;
+      if (id === 'spaghetti' || id === 'lasagna' || id === 'cheese' || early || (D && !roll)) {
+        if (D && part === 1 && i === 15) return ROOT[ch] + 12;   // the spaghetti part gets an extra slide
+        return BASSP[i] !== undefined ? ROOT[ch] + BASSP[i] : 0;
+      }
+      return 0;
+    case 'pad': return i === 0 && (id === 'lasagna' || id === 'cheese' || (id === 'build' && lb < 3) || D || (id === 'outro' && lb < 3)) ? ch + 1 : 0;
+    case 'vox': {
+      const n = VOX_AT.indexOf(i);
+      if (n < 0) return 0;
+      if (id === 'cheese') return lb < 2 && n % 2 ? 0 : VOXM[ch][n];
+      if (early || (D && !roll) || (id === 'outro' && lb === 0)) return VOXM[ch][n];
+      return 0;
+    }
+    case 'crash': return i === 0 && ((D && e8 === 0) || (id === 'outro' && lb === 0)) ? 1 : 0;
+    case 'perc': return hit('hat', s) || hit('clap', s) || hit('snare', s);
+  }
+  return 0;
+}
+const { pulse, since, countdown, sequencer } = Engine.envelopes(hit, clock);
+const lastStep = (layer, t, back = 32) => { const d = since(layer, t, back); return d > 90 ? null : Math.round((t - d) / STEP); };
+
+// each instrument wears one colour for the whole video, and so does the pasta shape it stands for
+const P = {
+  ...Engine.NEUTRALS,
+  kick: '#ffe14a', kickD: '#5e4c10', kickL: '#fff4b0',   // gravity, the star
+  perc: '#3ae8ff', percD: '#0c3c48', percL: '#b0f6ff',   // the shuffle
+  org: '#ff8a2a', orgD: '#5e2c0c', orgL: '#ffc89a',      // gnocchi: nuclei
+  bass: '#ff3ad0', bassD: '#4e0e40', bassL: '#ff9aea',   // spaghetti: rods
+  pad: '#7dff3a', padD: '#1f4a10', padL: '#d4ffb4',      // lasagna: sheets
+  vox: '#a46aff', voxD: '#2e1a5e', voxL: '#dccaff',      // bucatini + swiss cheese: holes
+};
+const LAYER_COL = { kick: P.kick, perc: P.perc, org: P.org, bass: P.bass, pad: P.pad, vox: P.vox };
+const CYC = [P.kick, P.org, P.bass, P.pad, P.vox, P.perc];
+const cyc = n => CYC[((n % 6) + 6) % 6];
+const phCol = k => P[PH[k].col], phColD = k => P[PH[k].col + 'D'], phColL = k => P[PH[k].col + 'L'];
+
+// ---------- canvas + gfx helpers ----------
+const { cx, text, card, bay, fillCircle, ditherCircle, ring, line, dot, ditherFill, banner, fact, timeline } = Engine.gfx(P);
+const { mulberry, hash } = Engine.rand;
+const { fmtNum, rough } = Engine.fmt;
+const { clamp, smooth } = Engine.math;
+const rng = mulberry(30816);
+
+// free neutrons drifting between the pasta
+const GAS = Array.from({ length: 80 }, () => ({ x: rng() * W, y: 36 + rng() * 160, vx: (rng() - 0.5) * 14, vy: (rng() - 0.5) * 6, b: rng() }));
+function gas(t, d = 1) {
+  const he = pulse('hat', t, 14);
+  GAS.forEach((g, k) => {
+    const x = ((g.x + g.vx * t) % W + W) % W, y = 36 + ((g.y - 36 + g.vy * t) % 160 + 160) % 160;
+    dot(x, y, he > 0.5 && k % 5 === 0 ? P.perc : g.b > 0.7 ? P.dim : P.edge, d);
+  });
+}
+
+// ---------- the pasta cube: a raymarched 3x3x3-cell chunk of the lattice ----------
+// Cell units: pieces centre on whole numbers (balls at x,y,z; rods along z at x,y; sheets at y), holes on halves.
+// The shape is a pure function of the filling fraction u; near a boundary the two shapes' surfaces blend.
+const HALF = 1.5, BLEND = 0.025;
+const RAD = [0, 0, 0, 0, 0];
+let KA = 0, KB = 0, WB = 0;
+function setShape(u) {
+  RAD[0] = Math.cbrt(3 * u / (4 * Math.PI)); RAD[1] = Math.sqrt(u / Math.PI); RAD[2] = u / 2;
+  RAD[3] = Math.sqrt((1 - u) / Math.PI); RAD[4] = Math.cbrt(3 * (1 - u) / (4 * Math.PI));
+  KA = KB = winner(u); WB = 0;
+  for (let k = 1; k < PH.length; k++) {
+    if (Math.abs(u - T[k]) < BLEND) { KA = k - 1; KB = k; WB = smooth((u - T[k] + BLEND) / (2 * BLEND)); }
+  }
+}
+function sd(k, x, y, z) {
+  if (k < 3) {
+    const a = x - Math.round(x), b = y - Math.round(y), c = z - Math.round(z);
+    return k === 0 ? Math.sqrt(a * a + b * b + c * c) - RAD[0] : k === 1 ? Math.sqrt(a * a + b * b) - RAD[1] : Math.abs(b) - RAD[2];
+  }
+  const a = x - Math.floor(x) - 0.5, b = y - Math.floor(y) - 0.5, c = z - Math.floor(z) - 0.5;
+  return k === 3 ? RAD[3] - Math.sqrt(a * a + b * b) : RAD[4] - Math.sqrt(a * a + b * b + c * c);
+}
+const shapeD = (x, y, z) => WB <= 0 ? sd(KA, x, y, z) : WB >= 1 ? sd(KB, x, y, z) : sd(KA, x, y, z) * (1 - WB) + sd(KB, x, y, z) * WB;
+
+const rgba = h => { const n = parseInt(h.slice(1), 16); return (255 << 24) | ((n & 255) << 16) | (((n >> 8) & 255) << 8) | (n >> 16); };   // little-endian ImageData
+const TONES = PH.map((_, k) => [phColD(k), phCol(k), phColL(k), P.white].map(rgba));
+const sprite = document.createElement('canvas');
+const spx = sprite.getContext('2d');
+
+// o = { u, yaw, pitch, squash (>= 1 flattens it), glow(x, y, z) -> extra light }
+function cube(x0, y0, sc, o) {
+  setShape(o.u);
+  const k = o.squash || 1, ext = Math.ceil(HALF * 1.74 * sc) + 1, size = 2 * ext;
+  if (sprite.width !== size) { sprite.width = sprite.height = size; }
+  const img = spx.createImageData(size, size), buf = new Uint32Array(img.data.buffer);
+  const cyw = Math.cos(o.yaw), syw = Math.sin(o.yaw), cp = Math.cos(o.pitch), sp = Math.sin(o.pitch);
+  const fx = syw * cp, fy = -sp, fz = cyw * cp, rx = cyw, rz = -syw, ux = syw * sp, uy = cp, uz = cyw * sp;
+  // light from the upper left, toward the viewer
+  let lx = -0.55 * rx + 0.75 * ux - 0.5 * fx, ly = 0.75 * uy - 0.5 * fy, lz = -0.55 * rz + 0.75 * uz - 0.5 * fz;
+  const ln = Math.hypot(lx, ly, lz); lx /= ln; ly /= ln; lz /= ln;
+  const dy = fy * k, dn = Math.hypot(fx, dy, fz), depth = 2 * HALF * 1.74;
+  const tA = TONES[KA], tB = TONES[KB], glow = o.glow;
+  const D = (x, y, z) => Math.max(shapeD(x, y, z), Math.abs(x) - HALF, Math.abs(y) - HALF, Math.abs(z) - HALF);
+  for (let py = 0; py < size; py++) {
+    for (let px = 0; px < size; px++) {
+      const X = (px - ext + 0.5) / sc, Y = (ext - py - 0.5) / sc;
+      const ox = rx * X + ux * Y - fx * 6, oy = (uy * Y - fy * 6) * k, oz = rz * X + uz * Y - fz * 6;
+      // ray against the box, remembering which face it enters
+      let tn = -1e9, tf = 1e9, face = -1;
+      const O = [ox, oy, oz], Dd = [fx, dy, fz];
+      for (let a = 0; a < 3; a++) {
+        if (Math.abs(Dd[a]) < 1e-9) { if (Math.abs(O[a]) > HALF) { tn = 1; tf = 0; } continue; }
+        let t1 = (-HALF - O[a]) / Dd[a], t2 = (HALF - O[a]) / Dd[a];
+        if (t1 > t2) { const q = t1; t1 = t2; t2 = q; }
+        if (t1 > tn) { tn = t1; face = a; }
+        if (t2 < tf) tf = t2;
+      }
+      if (tn > tf) continue;
+      let t = tn + 1e-4, x = ox + fx * t, y = oy + dy * t, z = oz + fz * t, v = shapeD(x, y, z), nx, ny, nz, hitP = false;
+      if (v < 0) {   // matter right at the box wall: a cut face
+        hitP = true; nx = ny = nz = 0;
+        const sgn = -Math.sign(Dd[face]);
+        if (face === 0) nx = sgn; else if (face === 1) ny = sgn; else nz = sgn;
+      } else {
+        for (let n = 0; n < 48 && t < tf; n++) {
+          t += Math.max(v * 0.85, 0.004) / dn;
+          x = ox + fx * t; y = oy + dy * t; z = oz + fz * t;
+          v = shapeD(x, y, z);
+          if (v < 0.003) { hitP = true; break; }
+        }
+        if (!hitP) continue;
+        const e = 0.01;
+        nx = D(x + e, y, z) - D(x - e, y, z); ny = (D(x, y + e, z) - D(x, y - e, z)) * k; nz = D(x, y, z + e) - D(x, y, z - e);
+        const nn = Math.hypot(nx, ny, nz) || 1; nx /= nn; ny /= nn; nz /= nn;
+      }
+      const diff = Math.max(0, nx * lx + ny * ly + nz * lz);
+      let l = (0.2 + 0.8 * diff) * (1 - 0.35 * (t - tn) / depth * dn);
+      if (glow) l += glow(x, y, z);
+      const sx = px + x0 - ext, sy = py + y0 - ext, b = bay(sx, sy);
+      const tone = clamp(Math.floor(l * 2.7 + b / 16 - 0.5), 0, 3);
+      buf[py * size + px] = (WB > 0 && b < WB * 16 ? tB : tA)[tone];
+    }
+  }
+  spx.putImageData(img, 0, 0);
+  cx.drawImage(sprite, Math.round(x0 - ext), Math.round(y0 - ext));
+}
+
+// how the music lights the pasta: an organ stab lights one ball, a bass note runs along the rods,
+// a pad chord washes over the sheets, a vocal chop lights one hole
+function pastaGlow(t, layers) {
+  const g = {};
+  for (const L of layers) { const s = lastStep(L, t); if (s !== null) g[L] = { s, e: Math.exp(-(t - s * STEP) * (L === 'pad' ? 2.5 : 9)), age: t - s * STEP }; }
+  const cell = (s, n) => Math.floor(hash(s * 13 + n) * 3) - 1;
+  return (x, y, z) => {
+    let l = 0;
+    if (g.org && g.org.e > 0.02) { const s = g.org.s; if (Math.round(x) === cell(s, 1) && Math.round(y) === cell(s, 2) && Math.round(z) === cell(s, 3)) l += 0.9 * g.org.e; }
+    if (g.bass && g.bass.age < STEP * 6) { const zz = -HALF + g.bass.age / (STEP * 5) * 2 * HALF; if (Math.abs(z - zz) < 0.25) l += 0.6; }
+    if (g.pad && g.pad.e > 0.02) l += 0.35 * g.pad.e * (0.5 + 0.5 * Math.sin(x * 3 + z * 2 - t * 4));
+    if (g.vox && g.vox.e > 0.02) { const s = g.vox.s; if (Math.floor(x) === cell(s, 4) && Math.floor(y) === cell(s, 5)) l += 0.7 * g.vox.e; }
+    return l;
+  };
+}
+
+const yawAt = t => 0.6 + t * 0.32, pitchAt = t => 0.5 + 0.12 * Math.sin(t * 0.21);
+function pastaCube(t, u, layers, o = {}) {
+  const ke = pulse('kick', t, 9);
+  cube(o.x ?? X, o.y ?? Y, o.sc ?? 24, { u, yaw: yawAt(t), pitch: pitchAt(t), squash: 1 + (o.squeeze ?? 0.06) * ke, glow: layers.length ? pastaGlow(t, layers) : null });
+}
+
+// the shape's name and size, under the cube
+function shapeLabel(u, y = 182) {
+  const k = winner(u), r = rOpt(k, u);
+  const what = PH[k].hole ? `HOLES ${fmtNum(2 * r)} FM WIDE` : PH[k].d === 1 ? `${fmtNum(2 * r)} FM THICK` : `${fmtNum(2 * r)} FM WIDE`;
+  text(`${PH[k].name}: ${what}`, X, y, phColL(k), 1, 'c');
+}
+
+// ---------- the neutron star, in cross-section ----------
+function star(x, y, R, t, o = {}) {
+  const ke = pulse('kick', t, 10), r = Math.round(R - 2 * ke * (o.squeeze ?? 1));
+  const rc = Math.round(r * (1 - STAR.crustKm / STAR.rkm));   // crust to scale
+  ditherCircle(x, y, r, r + 6 + 4 * ke, P.kick, 0.25 + 0.3 * ke);
+  fillCircle(x, y, r, P.dim);
+  fillCircle(x, y, r - 1, P.edge);
+  fillCircle(x, y, rc, P.kickD);
+  ditherCircle(x, y, 0, rc, P.kick, 0.18);
+  ditherCircle(x, y, 0, rc * 0.45, P.kickL, 0.35);
+  // the pasta band at the base of the crust, in all its shapes' colours, flashing with the music
+  const pe = o.pasta ?? 0.6;
+  for (let k = 0; k < 120; k++) {
+    const a = k / 120 * 6.283 + t * 0.15, col = phCol(Math.floor(k / 6) % 5);
+    for (let j = 0; j < 2; j++) dot(x + Math.cos(a) * (rc + j), y + Math.sin(a) * (rc + j), col, pe);
+  }
+  // gravity pulls everything in on every kick
+  if (ke > 0.05) for (let k = 0; k < 8; k++) {
+    const a = k / 8 * 6.283 + 0.39, r0 = r + 22 - 10 * (1 - ke), r1 = r + 6;
+    line(x + Math.cos(a) * r0, y + Math.sin(a) * r0, x + Math.cos(a) * r1, y + Math.sin(a) * r1, P.kick, ke);
+  }
+  return { r, rc };
+}
+
+// nuclei squeezed together: clusters of protons (organ colour, they become gnocchi) and neutrons
+function nuclei(t, x0, y0, gap) {
+  for (let n = 0; n < 6; n++) {
+    const cxn = x0 + n * gap;
+    for (let k = 0; k < 14; k++) {
+      const a = k * 2.4, rr = Math.sqrt(k) * 1.6, jx = Math.round(Math.sin(t * 9 + k + n) * 0.6);
+      cx.fillStyle = k % 3 ? P.fg : P.org;
+      cx.fillRect(Math.round(cxn + Math.cos(a) * rr) + jx, Math.round(y0 + Math.sin(a) * rr), 2, 2);
+    }
+  }
+}
+
+// ---------- audio (everything synthesised) ----------
+const { midi, G, F, chain, pan, warm, osc, env, play, noise } = Engine.audio;
+let master, secGain, comp, duck, kickIn, bassIn, orgIn, padIn, voxIn, percIn, fxSend;
+
+function buildGraph(ac, out) {
+  master = out;
+  comp = ac.createDynamicsCompressor();
+  comp.threshold.value = -14; comp.knee.value = 6; comp.ratio.value = 4; comp.attack.value = 0.004; comp.release.value = 0.14;
+  secGain = G(0.75);   // section level: the drop gets the headroom
+  chain(comp, secGain, master);
+  // sidechain bus: organ, pad and vocals pump against the kick, the garage-house breathing
+  duck = G(1); duck.connect(comp);
+  // ping-pong echo, dotted eighth
+  const dl = ac.createDelay(1), dr = ac.createDelay(1);
+  dl.delayTime.value = dr.delayTime.value = STEP * 3;
+  const fbl = G(0.35), fbr = G(0.35), lpl = F('lowpass', 3000), lpr = F('lowpass', 2400);
+  fxSend = G(1);
+  const merge = ac.createChannelMerger(2);
+  chain(fxSend, dl, lpl, fbl, dr, lpr, fbr, dl);
+  lpl.connect(merge, 0, 0); lpr.connect(merge, 0, 1);
+  chain(merge, G(0.45), duck);
+  kickIn = G(1); chain(kickIn, warm(2), G(0.8), comp);
+  bassIn = G(1); chain(bassIn, warm(1.5), F('lowpass', 1200), G(0.38), comp);
+  orgIn = G(1); chain(orgIn, G(0.42), duck); orgIn.connect(G(0.2)).connect(fxSend);
+  padIn = G(1); chain(padIn, F('lowpass', 2600), G(0.45), duck);
+  voxIn = G(1); chain(voxIn, G(0.55), duck); voxIn.connect(G(0.35)).connect(fxSend);
+  percIn = G(0.75); percIn.connect(comp);
+}
+
+const metal = (t, dur, vol, hp, p = 0, dest = percIn) => Engine.audio.metal(t, dur, vol, hp, p, dest);
+const riser = (t, dur, vol) => Engine.audio.riser(t, dur, vol, percIn);
+const impact = t => Engine.audio.impact(t, kickIn);
+const crash = t => { metal(t, 1.6, 0.3, 4000, -0.3); metal(t + 0.002, 1.4, 0.2, 5000, 0.3, fxSend); noise(t, 1.2, 0.14, 'highpass', 6000, percIn); };
+
+// round house kick on F1, ducking the melodic bus
+function kick(t, vel) {
+  const o = osc('sine', 170, t);
+  o.frequency.exponentialRampToValueAtTime(midi(29), t + 0.07);
+  const g = G(1); env(g, t, vel, 0.001, 0.32, 0.25);
+  chain(o, g, kickIn); play(o, t, 0.32);
+  const c = osc(0.5, 1800, t), cg = G(1); env(cg, t, vel * 0.12, 0.0005, 0.01);
+  chain(c, cg, kickIn); play(c, t, 0.012);
+  duck.gain.setValueAtTime(0.4, t);
+  duck.gain.setTargetAtTime(1, t + 0.04, 0.07);
+}
+// garage clap: three slaps and a tail into the echo
+function clap(t, vel) {
+  for (const [d, v, l] of [[0, 0.45, 0.01], [0.012, 0.4, 0.01], [0.024, 0.6, 0.16]]) noise(t + d, l, v * vel, 'bandpass', 1500, percIn, 1.1);
+  noise(t, 0.25, 0.05 * vel, 'highpass', 2500, fxSend);
+}
+function snare(t, vel) {
+  const o = osc('triangle', 330, t), g = G(1);
+  o.frequency.exponentialRampToValueAtTime(180, t + 0.05);
+  env(g, t, vel * 0.5, 0.001, 0.1);
+  chain(o, g, percIn); play(o, t, 0.1);
+  noise(t, 0.04 + 0.1 * vel, 0.5 * vel, 'highpass', 1800, percIn);
+}
+const hat = (t, v, p) => v === 1 ? metal(t, 0.12, 0.13, 7000, 0.2) : metal(t, 0.03, 0.1, 7800, p);
+
+// M1-style organ stab: each chord note a square and two sine harmonics, plucked short
+function organ(t, ch) {
+  const g = G(1), lp = F('lowpass', 3200, 1);
+  env(g, t, 0.9, 0.002, 0.3, 0.15);
+  chain(lp, g, orgIn);
+  for (const m of CHORD[ch]) {
+    const f = midi(m);
+    for (const [w, fm, a] of [[0.5, 1, 0.22], ['sine', 2, 0.3], ['sine', 4, 0.12]]) { const o = osc(w, f * fm, t); chain(o, G(a), lp); play(o, t, 0.3); }
+  }
+}
+// sub bass that slides in from the last note: the spaghetti strand
+function bass(t, m, dur, from) {
+  const g = G(1);
+  env(g, t, 0.9, 0.004, dur, 0.7);
+  chain(g, bassIn);
+  for (const [w, a] of [['sine', 1], ['triangle', 0.35]]) {
+    const o = osc(w, midi(from || m), t);
+    if (from) o.frequency.exponentialRampToValueAtTime(midi(m), t + 0.07);
+    chain(o, G(a), g); play(o, t, dur);
+  }
+}
+// pad: detuned pulses, slow in and out, held for the bar: the lasagna sheets
+function pad(t, ch, dur) {
+  const g = G(1);
+  g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(0.5, t + 0.35);
+  g.gain.setValueAtTime(0.5, t + dur - 0.3); g.gain.linearRampToValueAtTime(0.0001, t + dur);
+  chain(g, padIn);
+  CHORD[ch].forEach((m, n) => {
+    for (const det of [-9, 9]) { const o = osc(0.5, midi(m + 12), t); o.detune.value = det; chain(o, G(0.18), pan(n % 2 ? 0.35 : -0.35), g); play(o, t, dur); }
+  });
+}
+// vocal chop: a pulse through three vowel formants, with the classic little pitch drop at the end
+const FORM = { ah: [[800, 1], [1150, 0.5], [2900, 0.15]], oo: [[325, 1], [700, 0.35], [2530, 0.08]],
+               oh: [[450, 1], [800, 0.45], [2830, 0.1]], ee: [[270, 0.8], [2290, 0.45], [3010, 0.25]] };
+function vox(t, m, vowel, dur) {
+  const f = midi(m), g = G(1), p = pan(0);
+  env(g, t, 1, 0.01, dur, 0.55);
+  chain(g, p, voxIn);
+  const src = osc(0.25, f, t), src2 = osc(0.5, f, t);
+  src2.detune.value = 8;
+  for (const o of [src, src2]) { o.frequency.setValueAtTime(f, t + dur * 0.6); o.frequency.exponentialRampToValueAtTime(f * 0.94, t + dur); }
+  const mix = G(0.5); src.connect(mix); src2.connect(mix);
+  for (const [ff, a] of FORM[vowel]) chain(mix, F('bandpass', ff, 9), G(a * 4), g);
+  play(src, t, dur); play(src2, t, dur);
+}
+
+// a note rings until the next one on its layer (at most max steps), never into the silent beat
+function noteDur(layer, s, max) {
+  let n = 1;
+  while (n < max && !hit(layer, s + n) && !hushAt(s + n)) n++;
+  return n * STEP * 0.92;
+}
+const prevNote = (layer, s, back) => { for (let k = 1; k <= back; k++) { const v = hit(layer, s - k); if (v) return v; } return 0; };
+
+function voices(s, t) {
+  const { id, lb, i } = at(s), D = id === 'drop';
+  const ts = t + (i % 2 ? SWING * STEP : 0);   // the shuffle
+  if (i === 0) secGain.gain.setValueAtTime(D ? 0.95 : 0.75, t);
+  if (SHORT && s === 0) { impact(t); kick(t, 1); crash(t); organ(t, 0); }   // a Short must hit on frame one
+  if (id === 'title' && lb === 0 && i === 0) riser(t, 2 * BAR, 0.6);
+  if (id === 'build' && lb === 0 && i === 0) riser(t, 3.75 * BAR, 1.3);
+  if (D && lb % 8 === 7 && i === 0 && lb !== 31) riser(t, BAR * 0.97, 0.5);
+  if (hit('crash', s)) { impact(t); crash(t); }
+  const k = hit('kick', s); if (k) kick(t, k);
+  const h = hit('hat', s); if (h) hat(ts, h, i % 4 === 1 ? -0.3 : 0.3);
+  const cl = hit('clap', s); if (cl) clap(t, cl);
+  const sn = hit('snare', s); if (sn) snare(t, sn);
+  const o = hit('org', s); if (o) organ(ts, o - 1);
+  const b = hit('bass', s); if (b) bass(ts, b, noteDur('bass', s, 8), prevNote('bass', s, 8));
+  const pd = hit('pad', s); if (pd) pad(t, pd - 1, id === 'outro' && lb === 2 ? 2 * BAR : BAR * 0.98);
+  const v = hit('vox', s); if (v) vox(ts, v, VOWEL[VOX_AT.indexOf(i)], noteDur('vox', s, 3));
+}
+
+// ---------- HUD: the live step sequencer + the filling-fraction meter ----------
+const ROWS = [['KIK', 'kick', P.kick, P.kickD], ['HAT', 'perc', P.perc, P.percD], ['ORG', 'org', P.org, P.orgD],
+              ['BAS', 'bass', P.bass, P.bassD], ['PAD', 'pad', P.pad, P.padD], ['VOX', 'vox', P.vox, P.voxD]];
+const hud = sequencer(ROWS, { held: (layer, b0) => layer === 'pad' && !!hit('pad', b0) });
+
+// space filled by nuclear matter, with each shape's range from the model
+function meter(u) {
+  const y = 234, x0 = 26, n = 30, k = winner(u), m = Math.min(n - 1, Math.floor(u * n));
+  text('FILL', 4, y, P.dim);
+  for (let c = 0; c < n; c++) {
+    const kc = winner((c + 0.5) / n);
+    cx.fillStyle = c === m ? P.white : kc === k ? phCol(kc) : phColD(kc);
+    cx.fillRect(x0 + c * 4, y, 3, 5);
+  }
+  text(pct(u), 176, y, phColL(k), 1, 'r');
+}
+
+// ---------- scenes ----------
+// the filling fraction each section shows
+function uAt(id, lt) {
+  const bar = lt / BAR;
+  switch (id) {
+    case 'gnocchi': return MID[0];
+    case 'spaghetti': return MID[1];
+    case 'lasagna': return MID[2];
+    case 'cheese': return MID[3] + (MID[4] - MID[3]) * smooth((bar - 3) / 2);
+    case 'build': return 0.02 + 0.96 * Math.min(1, lt / (3.75 * BAR));
+    case 'drop': return dropU(bar);
+  }
+  return null;
+}
+
+function sceneTitle(lt, t, ctl) {
+  gas(t, 0.6);
+  pastaCube(t, 0.5 - 0.46 * Math.cos(t * 0.35), [], { y: 150, sc: 18, squeeze: 0 });
+  card([{ t: 'NUCLEAR', s: 3, c: P.org }, { t: 'PASTA', s: 3, c: P.bass }, { t: `CHIP GARAGE HOUSE - ${BPM} BPM`, c: P.dim }], 30);
+  text('INSIDE A NEUTRON STAR', 90, 212, P.dim, 1, 'c');
+  const on = ((t * 2) | 0) % 2 === 0;   // song time when playing; the not-started card is passed wall-clock seconds
+  if (!ctl.started) { if (on) card([{ t: 'TAP TO START', c: P.kick, s: 2 }], 250); }
+  else if (on) card([{ t: 'WHAT SHAPE IS MATTER, CRUSHED?', c: P.kick }], 250);
+}
+
+function sceneSqueeze(lt, t, sec) {
+  const bar = lb(lt);
+  const { r, rc } = star(X, 104, 54, t);
+  // labels follow the layers they name
+  const tag = (s, x, y, col, align) => { const w = s.length * 4 + 1, x0 = align === 'r' ? x - w : align === 'c' ? x - (w >> 1) - 1 : x - 1;
+    cx.fillStyle = P.bg; cx.fillRect(x0, y - 1, w + 1, 7); text(s, x, y, col, 1, align); };
+  line(X + Math.round(r * 0.5), 104 - Math.round(r * 0.87), 140, 42, P.dim); tag(`CRUST ${STAR.crustKm} KM`, 176, 38, P.fg, 'r');
+  line(X - rc, 128, X - rc - 8, 150, P.org); tag('PASTA', 4, 152, P.org);
+  tag('CORE', X, 102, P.kickL, 'c');
+  if (bar >= 4) {   // and further in: nuclei squeezed until they touch
+    const gap = Math.round(30 - 18 * smooth((lt - 4 * BAR) / (3.5 * BAR)));
+    nuclei(t, X - 2.5 * gap, 176, gap);
+  }
+  banner('1. THE SQUEEZE', 'LAYER 1: KICK + HATS = GRAVITY', P.kick);
+  fact(bar < 4 ? ['A NEUTRON STAR:', { t: `${fmtNum(STAR.mass)} SUNS IN ${fmtNum(2 * STAR.rkm)} KM`, c: P.kick }, { t: `1 CM CUBE: ~${rough(TONNES_CM3)} TONNES`, c: P.dim }]
+               : [`GRAVITY: ${rough(G_X)} X EARTH'S`, { t: 'CRUSHES ATOMS IN THE CRUST', c: P.kick }, { t: 'NUCLEI SQUEEZED TILL THEY TOUCH', c: P.dim }], P.kick);
+  timeline('SCHEMATIC. PASTA LAYER THICKENED');
+}
+
+function shapeScene(layer, title, sub, lines, lt, t) {
+  gas(t);
+  const u = uAt(SONG[BAR_SEC[Math.floor(t / BAR)]].id, lt);
+  pastaCube(t, u, [layer]);
+  shapeLabel(u);
+  banner(title, sub, LAYER_COL[layer]);
+  fact(lines, LAYER_COL[layer]);
+  const k = winner(u);
+  timeline(`SCHEMATIC. CUBE ~${fmtNum(3 * cellFm(k, u))} FM ACROSS`);
+  meter(u);
+}
+
+function sceneGnocchi(lt, t) {
+  const r = rOpt(0, MID[0]);
+  shapeScene('org', '2. GNOCCHI', 'LAYER 2: ORGAN STABS = NUCLEI', lb(lt) < 4
+    ? ['ZOOM IN: NUCLEI PACKED TIGHT', { t: `BALLS ${fmtNum(2 * r)} FM WIDE`, c: P.org }, { t: '1 FM = A MILLION-BILLIONTH M', c: P.dim }]
+    : ['PROTONS PUSH APART (CHARGE)', { t: 'SURFACE TENSION PULLS IN', c: P.org }, { t: 'FREE NEUTRONS FILL THE GAPS', c: P.dim }], lt, t);
+}
+function sceneSpaghetti(lt, t) {
+  shapeScene('bass', '3. SPAGHETTI', 'LAYER 3: SLIDING BASS = RODS', lb(lt) < 4
+    ? ['DEEPER, DENSER: BALLS FUSE', { t: 'INTO LONG RODS', c: P.bass }, { t: `ONCE ${pct(T[1])} OF SPACE IS FULL`, c: P.dim }]
+    : ['NATURE PICKS THE SHAPE', { t: 'WITH THE LEAST ENERGY', c: P.bass }, { t: 'HERE, RODS BEAT BALLS', c: P.dim }], lt, t);
+}
+function sceneLasagna(lt, t) {
+  shapeScene('pad', '4. LASAGNA', 'LAYER 4: PAD CHORDS = SHEETS', lb(lt) < 4
+    ? ['DEEPER STILL: FLAT SHEETS', { t: `FROM ${pct(T[2])} FULL`, c: P.pad }, { t: 'STACKED LIKE LASAGNA', c: P.dim }]
+    : ['MAYBE THE STRONGEST STUFF', { t: `~${rough(PASTA.steelX)} X STEEL`, c: P.pad }, { t: '(IN COMPUTER SIMULATIONS)', c: P.dim }], lt, t);
+}
+function sceneCheese(lt, t) {
+  shapeScene('vox', '5. SWISS CHEESE', 'LAYER 5: VOCAL CHOPS = HOLES', lb(lt) < 4
+    ? ['MORE PASTA THAN GAP...', { t: 'IT TURNS INSIDE OUT', c: P.vox }, { t: `BUCATINI: TUBE HOLES, ${pct(T[3])}+`, c: P.dim }]
+    : ['ONLY BUBBLES OF GAS LEFT', { t: `SWISS CHEESE, ${pct(T[4])}+`, c: P.vox }, { t: 'THE HOLES ARE THE PIECES NOW', c: P.dim }], lt, t);
+}
+
+// the race the build is about: each shape's extra energy over the cheapest one, from the model
+const PLOT = { x0: 24, x1: 172, y0: 44, y1: 138, top: 0.1 };
+const CURVES = PH.map((_, k) => {
+  const pts = [];
+  for (let x = PLOT.x0; x <= PLOT.x1; x++) {
+    const u = (x - PLOT.x0 + 0.5) / (PLOT.x1 - PLOT.x0 + 1);
+    let mn = Infinity; for (let j = 0; j < PH.length; j++) mn = Math.min(mn, energy(j, u));
+    pts.push([x, energy(k, u) / mn - 1]);
+  }
+  return pts;
+});
+function energyPlot(u) {
+  const { x0, x1, y0, y1, top } = PLOT, yv = v => Math.round(y1 - v / top * (y1 - y0));
+  cx.fillStyle = P.edge; cx.fillRect(x0, y1 + 1, x1 - x0 + 1, 1); cx.fillRect(x0 - 1, y0, 1, y1 - y0 + 2);
+  const ux = Math.round(x0 + u * (x1 - x0));
+  CURVES.forEach((pts, k) => { for (const [x, v] of pts) if (v <= top) { cx.fillStyle = x <= ux ? phCol(k) : phColD(k); cx.fillRect(x, yv(v), 1, v < 0.002 ? 2 : 1); } });
+  line(ux, y0, ux, y1, P.white, 0.6);
+  const k = winner(u);
+  text(PH[k].name, clamp(ux, x0 + 26, x1 - 26), y0 - 8, phColL(k), 1, 'c');
+  text('0%', x0, y1 + 4, P.dim); text('100%', x1, y1 + 4, P.dim, 1, 'r'); text('SPACE FILLED', (x0 + x1) / 2, y1 + 4, P.edge, 1, 'c');
+  text('+10%', x0 + 3, y0, P.edge);
+}
+
+function sceneBuild(lt, t, sec) {
+  gas(t, 0.5);
+  const u = uAt('build', lt);
+  energyPlot(u);
+  pastaCube(t, u, [], { y: 172, sc: 8, squeeze: 0.1 });
+  banner('6. WHO WINS?', 'BUILD: SNARE ROLL + RISER', P.kick);
+  fact(['EACH SHAPE COSTS ENERGY', { t: 'THE CHEAPEST ONE WINS', c: P.kick }, { t: 'SQUEEZE: THE WINNER CHANGES', c: P.dim }], P.kick);
+  timeline('LIQUID-DROP MODEL, SIMPLIFIED');
+  meter(u);
+  countdown(lt, sec, () => {   // drawn last so the digits sit on top; the silent beat wipes the scene
+    cx.fillStyle = P.bg; cx.fillRect(0, 0, W, H);
+    star(X, 120, 30, t, { pasta: 1 });
+    text('SQUEEZE!', 90, 176, P.white, 3, 'c');
+  }, 90, 70);
+}
+
+// --- the drop: four 8-bar parts, the squeeze running on through every shape ---
+const DROP_TXT = [
+  (u, e8, col) => ({ title: '7. GNOCCHI', time: 'SCHEMATIC: THE SQUEEZE SPED UP',
+    lines: e8 < 4 ? ['DEEPER = DENSER', { t: `${pct(u)} OF SPACE FILLED`, c: col }, { t: 'THE BALLS SWELL...', c: P.dim }]
+                  : ['WHY NOT STAY BALLS?', { t: 'SURFACE TENSION VS', c: col }, { t: 'PROTONS PUSHING APART', c: P.dim }] }),
+  (u, e8, col) => ({ title: '8. SPAGHETTI', time: 'SCHEMATIC: THE SQUEEZE SPED UP',
+    lines: e8 < 4 ? ['THE BALLS TOUCH AND FUSE', { t: `RODS FROM ${pct(T[1])} FULL`, c: col }, { t: `${fmtNum(2 * rOpt(1, u))} FM ACROSS`, c: P.dim }]
+                  : ['PROTONS AND NEUTRONS', { t: 'SMASHED INTO ONE STRAND', c: col }, { t: 'NO SEPARATE NUCLEI LEFT', c: P.dim }] }),
+  (u, e8, col) => ({ title: '9. LASAGNA', time: 'SCHEMATIC: THE SQUEEZE SPED UP',
+    lines: e8 < 4 ? [`SHEETS FROM ${pct(T[2])} FULL`, { t: `~${rough(PASTA.steelX)} X STEEL`, c: col }, { t: '(IN COMPUTER SIMULATIONS)', c: P.dim }]
+                  : ['STIFF ENOUGH TO HOLD', { t: 'MOUNTAINS ON THE STAR', c: col }, { t: 'A FEW MILLIMETRES TALL', c: P.dim }] }),
+  (u, e8, col) => ({ title: e8 < 4 ? '10. BUCATINI' : '11. SWISS CHEESE', time: 'SCHEMATIC. KICK GOES 2-STEP: INSIDE OUT',
+    lines: e8 < 4 ? [`PAST ${pct(T[3])}: INSIDE OUT`, { t: 'TUBES OF NEUTRON GAS', c: col }, { t: 'RUN THROUGH THE PASTA', c: P.dim }]
+                  : [`PAST ${pct(T[4])}: BUBBLES`, { t: 'THEN THEY SQUEEZE SHUT:', c: col }, { t: 'SMOOTH MATTER. THE CORE', c: P.dim }] }),
+];
+
+// gravity: rings closing in on the pasta on every kick
+function squeezeRings(t, s) {
+  for (let k = 0; k < 24; k++) {
+    if (!hit('kick', s - k)) continue;
+    const age = t - (s - k) * STEP, r = 120 - age * 150;
+    if (r < 46) break;
+    ring(X, Y, r, cyc((s - k) >> 2), 1, 0.55 * (1 - (120 - r) / 74));
+  }
+}
+
+function sceneDrop(lt, t, sec) {
+  const bar = lb(lt), part = bar >> 3, e8 = bar % 8, s = Math.floor(t / STEP);
+  const u = uAt('drop', lt), k = winner(u), col = phCol(k);
+  gas(t);
+  squeezeRings(t, s);
+  pastaCube(t, u, ['org', 'bass', 'pad', 'vox'], { squeeze: 0.09 });
+  shapeLabel(u);
+  const r = DROP_TXT[part](u, e8, col);
+  if (!CALM) ditherFill(col, 0.07 * pulse('kick', t, 8));
+  banner(r.title, 'ALL LAYERS: THE DROP!', col, CYC[Math.floor(t / BEAT) % 6]);
+  fact(r.lines, col);
+  timeline(r.time);
+  meter(u);
+}
+
+function sceneOutro(lt, t, sec) {
+  gas(t, 0.6);
+  star(X, 104, 54, t, { pasta: 1 - 0.7 * lt / secDur(sec), squeeze: 0.5 });
+  banner('THE END', 'PAD ALONE: THE CORE', P.pad);
+  fact(['ALL THAT PASTA IS A LAYER', { t: `~${STAR.crustKm} KM UNDER THE SURFACE`, c: P.pad }, { t: `ESCAPE SPEED: ${Math.round(V_ESC * 100)}% OF LIGHT`, c: P.dim }], P.pad);
+  timeline('SCHEMATIC. PASTA LAYER THICKENED');
+}
+
+const SCENES = { squeeze: sceneSqueeze, gnocchi: sceneGnocchi, spaghetti: sceneSpaghetti, lasagna: sceneLasagna, cheese: sceneCheese,
+                 build: sceneBuild, drop: sceneDrop, outro: sceneOutro };
+
+// ---------- one frame at song time tau; the engine's main loop calls it ----------
+function draw(tau) {
+  const t = tau % LOOP;
+  const bar = Math.floor(t / BAR), sec = SONG[BAR_SEC[bar]], lt = t - sec.start * BAR;
+  cx.setTransform(1, 0, 0, 1, 0, 0);
+  cx.fillStyle = P.bg; cx.fillRect(0, 0, W, H);
+  const ke = pulse('kick', t, 12), D = sec.id === 'drop';
+  if (!CALM && D && ke > 0.3) {   // screen shake on the drop's kicks
+    const s = Math.floor(t / STEP);
+    cx.setTransform(1, 0, 0, 1, Math.round((hash(s) - 0.5) * 4 * ke), Math.round((hash(s + 99) - 0.5) * 4 * ke));
+  }
+  if (sec.id === 'title') sceneTitle(lt, t, { started: true });
+  else SCENES[sec.id](lt, t, sec);
+  cx.setTransform(1, 0, 0, 1, 0, 0);
+  if (sec.id !== 'title') hud(t);
+  if (lt < 0.3 && !D && sec.k > 0) ditherFill(P.bg, 1 - lt / 0.3);   // fade in each section
+  const pl = lt % (8 * BAR);
+  if (D && !CALM && pl < 0.3) ditherFill(P.white, 0.7 * (1 - pl / 0.3));
+}
+
+// numbers behind the scene, for checking without ears: window.__phys()
+window.__phys = () => ({
+  T, MID, RHO, TONNES_CM3, G_X, V_ESC,
+  shapes: PH.map((p, k) => ({ name: p.name, u: MID[k], energy: energy(k, MID[k]), rFm: rOpt(k, MID[k]), cellFm: cellFm(k, MID[k]) })),
+  dropBoundaries: [8, 16, 24, 28].map(b => [b, dropU(b), winner(dropU(b) - 0.01), winner(dropU(b) + 0.01)]),
+  sectionU: SONG.map(s => [s.id, uAt(s.id, 0), uAt(s.id, secDur(s) - 0.01)]),
+});
+
+Engine.run({
+  clock, buildGraph, voices, draw,
+  title: sceneTitle,
+  paused: P.kick,
+  thumb: SONG.find(s => s.id === 'drop').start * BAR + 13 * BAR + 6 * STEP,   // spaghetti part, between kicks
+});
+})();
+</script>
+</body>
+</html>

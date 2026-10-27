@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pendulum: Chip House Mix</title>
+<link rel="icon" type="image/svg+xml" href="icon.svg">
+<link rel="stylesheet" href="../engine/engine.css">
+</head>
+<body>
+<canvas id="c" width="180" height="320"></canvas>
+<p>click / space: play-pause &middot; m: mute &middot; ?bpm=124 &amp;len=2 (m) &amp;calm=1 (no shake/flash)</p>
+<script src="../engine/engine.js"></script>
+<script>
+// TEMPLATE: a minimal scene on the shared engine. Copy this folder's index.html to site/<topic>/, then replace
+// the physics, the song, the hit() table, the instruments and the scenes. Keep the shape: everything drawn or
+// heard is computed from the constants at the top, and audio, HUD and visuals all read the same hit() table.
+(() => {
+'use strict';
+
+// ---------- config ----------
+const { W, H } = Engine;
+const { num, CALM, SHORT } = Engine.params;
+const BPM = num('bpm', 124, 100, 150);
+
+// the physics: every number on screen comes from here (overridable from the URL)
+const PEND = {
+  len: num('len', 2, 0.25, 25),   // pendulum length, m
+  g: 9.81,                        // gravity, m/s^2
+  amp: 0.35,                      // swing amplitude, rad (small, so the simple formula holds)
+};
+const PERIOD = 2 * Math.PI * Math.sqrt(PEND.len / PEND.g);   // s, for one full swing there and back
+
+const X = 90, Y = 112;
+
+// the track: one section per stage, each introducing one layer
+const SONG = [
+  { id: 'title', bars: 2 },
+  { id: 'swing', bars: 8 },    // layer 1: kick
+  { id: 'period', bars: 8 },   // layer 2: bass
+  { id: 'build', bars: 4 },    // snare roll, riser, countdown
+  { id: 'drop', bars: 16 },    // everything + lead
+  { id: 'outro', bars: 2 },
+];
+const clock = Engine.clock(BPM, SONG);
+const { STEP, BAR, BEAT, BAR_SEC, LOOP, at, lb } = clock;
+
+// A minor: Am F C G
+const ROOT = [45, 41, 48, 43];
+const LEAD = [69, 0, 72, 0, 76, 0, 72, 0, 74, 0, 72, 0, 71, 0, 67, 0];
+
+// single source of truth for what plays on step s: audio, HUD and visuals all read this
+function hit(layer, s) {
+  const { id, lb, i } = at(s), ch = lb % 4, D = id === 'drop';
+  const roll = id === 'build' && lb >= 2;
+  switch (layer) {
+    case 'kick': return (id === 'swing' || id === 'period' || D || (id === 'build' && lb < 2)) && i % 4 === 0 ? 1 : 0;
+    case 'bass': return (id === 'period' || D) && i % 4 === 2 ? ROOT[ch] : 0;
+    case 'hat': return D && i % 2 === 1 ? (i % 4 === 3 ? 1 : 0.5) : 0;
+    case 'snare': return roll ? 0.4 + 0.6 * ((lb - 2) * 16 + i) / 32 : D && (i === 4 || i === 12) ? 1 : 0;
+    case 'lead': return D ? LEAD[i] : 0;
+    case 'crash': return D && lb % 8 === 0 && i === 0 ? 1 : 0;
+    case 'perc': return hit('hat', s) || hit('snare', s);
+  }
+  return 0;
+}
+const { pulse, countdown, sequencer } = Engine.envelopes(hit, clock);
+
+// each instrument wears one colour for the whole video
+const P = {
+  ...Engine.NEUTRALS,
+  kick: '#ffd23f', kickD: '#5e4c10',
+  bass: '#3ae8ff', bassD: '#0c3c48',
+  lead: '#ff3ad0', leadD: '#4e0e40',
+  perc: '#7dff3a', percD: '#1f4a10',
+  bob: '#ff8a2a',
+};
+
+// ---------- canvas + gfx helpers ----------
+const { cx, text, card, line, fillCircle, ditherCircle, ditherFill, banner, fact, timeline } = Engine.gfx(P);
+const { mulberry, hash } = Engine.rand;
+const { fmtNum } = Engine.fmt;
+const rng = mulberry(2024);
+
+const STARS = Array.from({ length: 90 }, () => ({ x: rng() * W | 0, y: rng() * H | 0, b: rng() }));
+function stars() { for (const s of STARS) { cx.fillStyle = s.b > 0.6 ? P.dim : P.edge; cx.fillRect(s.x, s.y, 1, 1); } }
+
+// ---------- audio (everything synthesised) ----------
+const { midi, G, F, chain, osc, env, play, noise, warm } = Engine.audio;
+let master, secGain, comp, kickIn, bassIn, leadIn, percIn;
+
+function buildGraph(ac, out) {
+  master = out;
+  comp = ac.createDynamicsCompressor();
+  comp.threshold.value = -14; comp.ratio.value = 4;
+  secGain = G(0.7);   // section level: the drop gets the headroom
+  chain(comp, secGain, master);
+  kickIn = G(0.5); chain(kickIn, warm(2), comp);
+  bassIn = G(0.3); bassIn.connect(comp);
+  leadIn = G(0.18); leadIn.connect(comp);
+  percIn = G(0.4); percIn.connect(comp);
+}
+
+// the shared instruments, on this scene's buses
+const metal = (t, dur, vol, hp, p = 0, dest = percIn) => Engine.audio.metal(t, dur, vol, hp, p, dest);
+const riser = (t, dur, vol) => Engine.audio.riser(t, dur, vol, percIn);
+const impact = t => Engine.audio.impact(t, kickIn);
+
+function kick(t, vel) {
+  const o = osc('sine', 180, t), g = G(1);
+  o.frequency.exponentialRampToValueAtTime(48, t + 0.09);
+  env(g, t, vel, 0.001, 0.3, 0.3);
+  chain(o, g, kickIn); play(o, t, 0.3);
+}
+function bass(t, m) {
+  const o = osc(0.25, midi(m), t), lp = F('lowpass', 900, 4), g = G(1);
+  env(g, t, 0.9, 0.003, STEP * 1.8, 0.4);
+  chain(o, lp, g, bassIn); play(o, t, STEP * 1.8);
+}
+function lead(t, m) {
+  const o = osc(0.5, midi(m), t), g = G(1);
+  env(g, t, 0.6, 0.004, STEP * 1.6, 0.5);
+  chain(o, g, leadIn); play(o, t, STEP * 1.6);
+}
+function snare(t, vel) {
+  noise(t, 0.12, 0.6 * vel, 'highpass', 1800, percIn);
+  const o = osc('triangle', 220, t), g = G(1); env(g, t, 0.4 * vel, 0.001, 0.08);
+  chain(o, g, percIn); play(o, t, 0.08);
+}
+
+function voices(s, t) {
+  const { id, lb, i } = at(s), D = id === 'drop';
+  if (i === 0) secGain.gain.setValueAtTime(D ? 0.85 : 0.7, t);
+  if (SHORT && s === 0) { impact(t); kick(t, 1); metal(t, 1.2, 0.3, 4000); }   // a Short must hit on frame one
+  if (id === 'title' && lb === 0 && i === 0) riser(t, 2 * BAR, 1.5);
+  if (id === 'build' && lb === 0 && i === 0) riser(t, 3.75 * BAR, 0.8);
+  if (id === 'outro' && lb === 0 && i === 0) { impact(t); bass(t, ROOT[0]); lead(t, 69); }
+  if (hit('crash', s)) { impact(t); metal(t, 1.4, 0.3, 4000, -0.3); }
+  const k = hit('kick', s); if (k) kick(t, k);
+  const b = hit('bass', s); if (b) bass(t, b);
+  const h = hit('hat', s); if (h) metal(t, h === 1 ? 0.12 : 0.03, 0.12, 7500, 0.3);
+  const sn = hit('snare', s); if (sn) snare(t, sn);
+  const l = hit('lead', s); if (l) lead(t, l);
+}
+
+// ---------- the actor ----------
+// the pendulum at song time t, swinging at its real period
+function pendulum(t, x0, y0, px) {
+  const a = PEND.amp * Math.cos(2 * Math.PI * t / PERIOD), x = x0 + Math.sin(a) * px, y = y0 + Math.cos(a) * px;
+  line(x0, y0, Math.round(x), Math.round(y), P.dim);
+  ditherCircle(Math.round(x), Math.round(y), 0, 8 + 4 * pulse('kick', t, 10), P.bob, 0.4);
+  fillCircle(Math.round(x), Math.round(y), 5, P.bob);
+  cx.fillStyle = P.fg; cx.fillRect(x0 - 8, y0 - 1, 17, 2);
+  return { x, y };
+}
+
+// ---------- HUD: the live step sequencer ----------
+const ROWS = [['KIK', 'kick', P.kick, P.kickD], ['BAS', 'bass', P.bass, P.bassD], ['LED', 'lead', P.lead, P.leadD], ['PRC', 'perc', P.perc, P.percD]];
+const hud = sequencer(ROWS);
+
+// ---------- scenes ----------
+function sceneTitle(lt, t, ctl) {
+  stars();
+  pendulum(t, X, 120, 60);
+  card([{ t: 'PENDULUM', s: 3, c: P.bob }, { t: `CHIP HOUSE - ${BPM} BPM`, c: P.dim }], 30);
+  const on = ((t * 2) | 0) % 2 === 0;   // song time when playing; the not-started card is passed wall-clock seconds
+  if (!ctl.started) { if (on) card([{ t: 'TAP TO START', c: P.kick, s: 2 }], 250); }
+  else if (on) card([{ t: 'WHAT SETS ITS BEAT?', c: P.kick }], 250);
+}
+
+function sceneSwing(lt, t, sec) {
+  stars();
+  pendulum(t, X, 60, 110);
+  banner('1. THE SWING', 'LAYER 1: KICK', P.kick);
+  fact(lb(lt) < 4 ? ['A WEIGHT ON A STRING', { t: `${fmtNum(PEND.len)} M LONG`, c: P.kick }, { t: 'PULL IT ASIDE, LET GO', c: P.dim }]
+                  : ['IT SWINGS BACK AND FORTH', { t: `ONCE EVERY ${fmtNum(PERIOD)} S`, c: P.kick }, { t: 'SAME BEAT, BIG SWING OR SMALL', c: P.dim }], P.kick);
+  timeline('REAL SPEED');
+}
+
+function scenePeriod(lt, t, sec) {
+  stars();
+  pendulum(t, X, 60, 110);
+  banner('2. THE PERIOD', 'LAYER 2: BASS', P.bass);
+  fact(['ONLY LENGTH AND GRAVITY', { t: 'T = 2 PI ROOT(L / G)', c: P.bass }, { t: '4X LONGER = 2X SLOWER', c: P.dim }], P.bass);
+  timeline('REAL SPEED');
+}
+
+function sceneBuild(lt, t, sec) {
+  stars();
+  pendulum(t, X, 60, 110);
+  banner('3. WIND UP', 'BUILD: SNARE ROLL', P.perc);
+  fact(['GET READY...'], P.perc);
+  countdown(lt, sec, () => { cx.fillStyle = P.bg; cx.fillRect(0, 0, W, H); text('DROP!', 90, 140, P.white, 3, 'c'); });
+}
+
+function sceneDrop(lt, t, sec) {
+  stars();
+  const col = [P.kick, P.bass, P.lead, P.perc][Math.floor(t / BEAT) % 4];
+  for (let k = 0; k < 3; k++) pendulum(t + k * PERIOD / 6, X - 40 + k * 40, 60, 60 + k * 25);
+  if (!CALM) ditherFill(col, 0.08 * pulse('kick', t, 8));
+  banner('4. ALL TOGETHER', 'ALL LAYERS: THE DROP!', col, col);
+  fact(['LONGER STRING, SLOWER SWING', { t: 'THE BEAT IS SET BY LENGTH', c: col }], col);
+  timeline('REAL SPEED. LENGTHS 2:3:4 SHOWN');
+}
+
+function sceneOutro(lt, t, sec) {
+  stars();
+  pendulum(t, X, 60, 110);
+  banner('THE END', 'ONE MORE SWING', P.bob);
+}
+
+const SCENES = { swing: sceneSwing, period: scenePeriod, build: sceneBuild, drop: sceneDrop, outro: sceneOutro };
+
+// ---------- one frame at song time tau; the engine's main loop calls it ----------
+function draw(tau) {
+  const t = tau % LOOP;
+  const bar = Math.floor(t / BAR), sec = SONG[BAR_SEC[bar]], lt = t - sec.start * BAR;
+  cx.setTransform(1, 0, 0, 1, 0, 0);
+  cx.fillStyle = P.bg; cx.fillRect(0, 0, W, H);
+  const ke = pulse('kick', t, 12), D = sec.id === 'drop';
+  if (!CALM && D && ke > 0.3) {   // screen shake on the drop's kicks
+    const s = Math.floor(t / STEP);
+    cx.setTransform(1, 0, 0, 1, Math.round((hash(s) - 0.5) * 4 * ke), Math.round((hash(s + 99) - 0.5) * 4 * ke));
+  }
+  if (sec.id === 'title') sceneTitle(lt, t, { started: true });
+  else SCENES[sec.id](lt, t, sec);
+  cx.setTransform(1, 0, 0, 1, 0, 0);
+  if (sec.id !== 'title') hud(t);
+  if (lt < 0.3 && !D && sec.k > 0) ditherFill(P.bg, 1 - lt / 0.3);   // fade in each section
+}
+
+// numbers behind the scene, for checking without ears: window.__phys()
+window.__phys = () => ({ PERIOD, len: PEND.len });
+
+Engine.run({
+  clock, buildGraph, voices, draw,
+  title: sceneTitle,
+  paused: P.kick,
+  thumb: SONG.find(s => s.id === 'drop').start * BAR + 2 * BAR + 6 * STEP,   // two bars into the drop, between kicks
+});
+})();
+</script>
+</body>
+</html>

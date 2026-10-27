@@ -1,0 +1,854 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>HD 189733 b: Peak-Time Techno Mix</title>
+<link rel="icon" type="image/svg+xml" href="icon.svg">
+<link rel="stylesheet" href="../engine/engine.css">
+</head>
+<body>
+<canvas id="c" width="180" height="320"></canvas>
+<p>click / space: play-pause &middot; m: mute &middot; headphones: the rain pans east &middot; ?bpm=132 &amp;per=2.21857 (orbit, days: retunes the track) &amp;wind=2 (km/s) &amp;calm=1 (no shake/flash)</p>
+<script src="../engine/engine.js"></script>
+<script>
+(() => {
+'use strict';
+
+// ---------- config ----------
+const { W, H } = Engine;
+const { clamp, smooth } = Engine.math;
+const { num, CALM, SHORT } = Engine.params;
+const BPM = num('bpm', 132, 124, 140);
+
+// HD 189733 b, approximate published values. Every number drawn on screen comes from these.
+const PL = {
+  ly: 64.5,                                   // distance
+  periodD: num('per', 2.21857, 0.5, 10),      // orbit, days
+  mStarSun: 0.82, rStarSun: 0.765, tStar: 5050,   // host star HD 189733 A, an orange K dwarf
+  rJup: 1.138, mJup: 1.13,                    // the planet, Jupiter = 1
+  impact: 0.66,                               // transit impact parameter: how far off-centre it crosses, star radii
+  tDay: 1212, tNight: 973, hotDeg: 16,        // Spitzer 8 um phase curve (Knutson et al. 2007): hot spot 16 deg east
+  windKms: num('wind', 2, 0.2, 10),           // equatorial winds, ~7,200 km/h (Hubble/NASA 2013)
+  albBlue: 0.40, albRed: 0.12,                // geometric albedo 290-450 nm, and the upper limit 450-570 nm (Evans et al. 2013)
+  lossT: 1000,                                // atmosphere lost after the 2012 flare, tonnes/s, at least (Lecavelier des Etangs et al. 2012)
+  mag: 7.7,                                   // the star's brightness from Earth
+  found: 2005, blue: 2013, flare: 2012, h2s: 2024,
+};
+// sky positions, degrees: the star and its neighbour the Dumbbell Nebula (M27)
+const SKY = { ra: 300.1821, dec: 22.7108, m27ra: 299.9013, m27dec: 22.7211, m27w: 8 / 60, m27h: 5.6 / 60 };
+
+const AU_KM = 1.496e8, R_SUN_KM = 696000, R_JUP_KM = 71492, M_SUN_KG = 1.989e30, M_JUP_KG = 1.898e27, G_SI = 6.674e-11, G0 = 9.81;
+const T_SUN = 5772, MERCURY_AU = 0.387, JUP_YEARS = 11.86;
+const EARTH_GUST_KMH = 408, SOUND_KMH = 1235, NEPTUNE_KMH = 2100;    // Earth's record gust, sound in Earth's air, Neptune's winds
+const ORBIT_S = PL.periodD * 86400, PERIOD_H = PL.periodD * 24;
+const A_KM = Math.cbrt(G_SI * PL.mStarSun * M_SUN_KG * ORBIT_S ** 2 / (4 * Math.PI ** 2)) / 1000;   // Kepler's third law
+const A_AU = A_KM / AU_KM;
+const RSTAR_KM = PL.rStarSun * R_SUN_KM, RP_KM = PL.rJup * R_JUP_KM;
+const K_RAD = RP_KM / RSTAR_KM, DEPTH = K_RAD ** 2;                     // transit: planet/star radius ratio, fraction of light blocked
+const MERC_X = MERCURY_AU / A_AU;
+const V_KMS = 2 * Math.PI * A_KM / ORBIT_S;
+const STAR_DEG = 2 * Math.atan(RSTAR_KM / A_KM) * 180 / Math.PI, SUN_DEG = 2 * Math.atan(R_SUN_KM / AU_KM) * 180 / Math.PI;
+const FLUX = PL.rStarSun ** 2 * (PL.tStar / T_SUN) ** 4 / A_AU ** 2;   // sunlight, Earth = 1
+const T_EQ = PL.tStar * Math.sqrt(RSTAR_KM / (2 * A_KM));
+const GRAV = G_SI * PL.mJup * M_JUP_KG / (RP_KM * 1000) ** 2 / G0;
+const WIND_KMH = PL.windKms * 3600, GUST_X = WIND_KMH / EARTH_GUST_KMH, SOUND_X = WIND_KMH / SOUND_KMH;
+const LAP_H = 2 * Math.PI * RP_KM / PL.windKms / 3600;                 // the jet's time round the equator
+const HOT = PL.hotDeg * Math.PI / 180;
+const SEP_ARCMIN = Math.hypot((SKY.ra - SKY.m27ra) * Math.cos(SKY.dec * Math.PI / 180), SKY.dec - SKY.m27dec) * 60;
+
+// the track is tuned to the planet: its year as a frequency, raised 25 octaves, is F (+4 cents)
+const ORBIT_HZ = 1 / ORBIT_S, OCT = Math.round(Math.log2(175 / ORBIT_HZ)), TUNE_HZ = ORBIT_HZ * 2 ** OCT;
+const midi = m => TUNE_HZ * Math.pow(2, (m - 53) / 12);   // the tables below are written in F minor, F3 = 53 = TUNE_HZ
+const NOTE = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+const NOTE_F = 69 + 12 * Math.log2(TUNE_HZ / 440), KEY = NOTE[((Math.round(NOTE_F) % 12) + 12) % 12], CENTS = (NOTE_F - Math.round(NOTE_F)) * 100;
+
+const X = 90, OY = 112;
+
+// the track: one section per stage, each introducing one layer
+const SONG = [
+  { id: 'title', bars: 4 },
+  { id: 'star', bars: 8 },     // layer 1: kick
+  { id: 'orbit', bars: 8 },    // layer 2: rolling bass
+  { id: 'heat', bars: 8 },     // layer 3: acid line, its filter opened by the heat we see
+  { id: 'rain', bars: 8 },     // layer 4: glass hats + clap, panning east
+  { id: 'blue', bars: 8 },     // layer 5: chord stabs
+  { id: 'storm', bars: 4 },    // build: snare roll, riser, countdown
+  { id: 'drop', bars: 32 },    // everything + pad + lead (+ arp in the second half)
+  { id: 'outro', bars: 4 },
+];
+const clock = Engine.clock(BPM, SONG);
+const { STEP, BAR, BEAT, BAR_SEC, LOOP, at, lb } = clock;
+
+// on screen the planet laps its star once every 4 bars; every section starts at a transit
+const ORBIT_BARS = 4, ORBIT_LEN = ORBIT_BARS * BAR, SPEEDUP = ORBIT_S / ORBIT_LEN;
+const orbPhase = t => ((t / ORBIT_LEN) % 1 + 1) % 1;               // 0 = transit (in front of the star), 0.5 = eclipse (behind it)
+const orbAng = t => Math.PI / 2 + 2 * Math.PI * orbPhase(t);       // top-down view, Earth at the bottom of the screen
+// the planet's mean temperature on the face turned to us: the real phase curve, peaking 16 deg before eclipse
+const heatSeen = ph => (1 - Math.cos(2 * Math.PI * ph + HOT)) / 2;
+const tSeen = ph => PL.tNight + (PL.tDay - PL.tNight) * heatSeen(ph);
+// ...and the acid filter it opens: 260 Hz on the night side to 2.6 kHz on the hot spot, on an exponential scale
+const ACID_LO = 260, ACID_HI = 2600;
+const acidCut = ph => ACID_LO * Math.pow(ACID_HI / ACID_LO, heatSeen(ph));
+
+// F minor: Fm Db Ab Eb
+const BASSR = [41, 37, 44, 39];
+const CHD = [[60, 65, 68, 72], [61, 65, 68, 73], [60, 63, 68, 72], [58, 63, 67, 70]];
+const CHDP = [1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0];         // 3-3-4 stabs
+const LEADM = [[84, 0, 0, 0, 0, 0, 80, 0, 0, 0, 79, 0, 77, 0, 0, 0],
+               [0, 0, 0, 0, 0, 0, 0, 0, 77, 0, 80, 0, 0, 0, 84, 0],
+               [87, 0, 0, 0, 0, 0, 84, 0, 0, 0, 0, 0, 0, 0, 80, 0],
+               [82, 0, 0, 0, 0, 0, 0, 0, 79, 0, 0, 0, 0, 0, 0, 0]];
+const ARPI = [0, 1, 2, 3, 2, 1, 2, 3, 0, 1, 2, 3, 3, 2, 1, 2];
+// 303-style acid line over F2: semitones (-1 rest), accents and slides
+const ACIDN = [0, 0, 12, 0, -1, 0, 15, 0, 10, 0, 12, -1, 3, 0, 7, 12];
+const ACC = '..x...x...x....x', SLD = '...x...x.....x..';
+
+// single source of truth for what plays on step s: audio, HUD and visuals all read this
+function hit(layer, s) {
+  const { id, lb, i, sec } = at(s), k = sec.k, ch = lb % 4, D = id === 'drop', e8 = lb % 8;
+  const fill = D && e8 === 7 && i >= 12 && lb !== 31;   // snare fill into the next 8
+  const storm = id === 'storm';
+  switch (layer) {
+    case 'kick': return (((k >= 1 && k <= 5) || (storm && lb < 2) || D) && i % 4 === 0) || (id === 'outro' && lb === 0 && i === 0) ? 1 : 0;
+    case 'bass': {
+      if (!((k >= 2 && k <= 5) || (storm && lb < 3) || D) || fill) return 0;
+      if (id === 'orbit' && lb < 2 ? i % 4 !== 2 : i % 4 === 0) return 0;
+      return k >= 5 ? BASSR[ch] : 41;
+    }
+    case 'acid': return ((k >= 3 && k <= 5) || (storm && lb < 3) || D) && !fill && ACIDN[i] >= 0 ? 41 + ACIDN[i] : 0;
+    case 'hat':
+      if (id === 'rain' && lb < 2) return i % 4 === 2 ? 1 : 0;
+      return (id === 'rain' || id === 'blue' || (storm && lb < 2) || (D && !fill)) ? (i % 4 === 2 ? 1 : 0.5) : 0;
+    case 'clap': return ((id === 'rain' && lb >= 4) || id === 'blue' || (storm && lb < 2) || (D && !fill)) && (i === 4 || i === 12) ? 1 : 0;
+    case 'roll':
+      if (storm) return [i % 4 === 0, i % 2 === 0, true, i < 12][lb] ? 0.3 + 0.7 * (lb * 16 + i) / 60 : 0;
+      return fill ? 0.5 + 0.12 * (i - 12) : 0;
+    case 'stab': return (id === 'blue' || (storm && lb < 3) || (D && !fill)) && CHDP[i] ? 1 : 0;
+    case 'pad': return i === 0 && (D || ((id === 'title' || id === 'outro') && lb === 0)) ? 1 : 0;
+    case 'lead': return D ? LEADM[ch][i] : 0;
+    case 'arp': return D && lb >= 16 && !fill ? CHD[ch][ARPI[i]] + 12 : 0;
+    case 'crash': return i === 0 && ((D && e8 === 0) || (id === 'outro' && lb === 0)) ? 1 : 0;
+    case 'perc': return hit('hat', s) || hit('clap', s) || hit('roll', s);
+    case 'chd': return hit('stab', s) || hit('pad', s);
+    case 'led': return hit('lead', s) || hit('arp', s) || hit('crash', s);
+  }
+  return 0;
+}
+const { pulse, countdown, sequencer } = Engine.envelopes(hit, clock);
+
+// one colour per instrument, kept for the whole track
+const P = {
+  ...Engine.NEUTRALS,
+  kick: '#ffa53a', kickD: '#5a3810', kickL: '#ffe2a0',     // the star, orange (a 5050 K K dwarf)
+  bass: '#b07cff', bassD: '#3a2366', bassL: '#dcc4ff',     // the orbit, violet
+  acid: '#ff4a3a', acidD: '#5e140e', acidL: '#ffa080',     // the heat, red
+  glass: '#7ff7ff', glassD: '#145a66', glassL: '#e0ffff',  // the glass rain, cyan
+  chd: '#4a7aff', chdD: '#122a6e', chdL: '#a8c4ff',        // the blue, cobalt
+  lead: '#ff5ad0', leadD: '#4e0e40', leadL: '#ffb8ec',     // the drop's lead, magenta
+  night: '#0a1240', deep: '#2546c8', heatN: '#24081c',     // planet night side, mid blue, coldest heat-map colour
+  neb: '#3ddc97', jup: '#c89a64', jupL: '#e8d2a8', jupD: '#7a5434',
+  sv: '#8a4aff', sg: '#3ddc6a', sy: '#ffd23f', so: '#ff8a2a',   // spectrum: violet, green, yellow, orange
+};
+const STAR = [P.kick, '#d9741e', P.kick, P.kickL];
+const CYC = [P.kick, P.bass, P.acid, P.glass, P.chd, P.lead];
+const PCOL = [P.night, P.chdD, P.deep, P.chd, P.chdL];          // the planet's blues, darkest first
+const TCOL = [P.heatN, P.acidD, P.acid, P.acidL, P.white];       // false-colour heat, coldest first
+
+// ---------- canvas + gfx helpers ----------
+const { cx, textW, text, card, bay, fillCircle, ditherCircle, dEllipse, ring, line, dot, ditherFill, sun, banner, fact, timeline } = Engine.gfx(P);
+const { mulberry, hash } = Engine.rand;
+const { fmtNum, fmtBig, rough } = Engine.fmt;
+
+function arrow(x0, y0, x1, y1, col, d = 1) {
+  line(x0, y0, x1, y1, col, d);
+  const a = Math.atan2(y1 - y0, x1 - x0);
+  for (const s of [-1, 1]) line(x1, y1, x1 + 4 * Math.cos(a + s * 2.5), y1 + 4 * Math.sin(a + s * 2.5), col, d);
+}
+// text with a 1px black outline, for labels sitting on busy pictures
+function label(s, x, y, col, align = 'l') {
+  for (const [dx, dy] of [[-1, 0], [1, 0], [0, -1], [0, 1], [1, 1]]) text(s, x + dx, y + dy, P.shadow, 1, align);
+  text(s, x, y, col, 1, align);
+}
+
+const rng = mulberry(189733);
+const STARS = Array.from({ length: 140 }, () => ({ x: rng() * W | 0, y: rng() * H | 0, b: rng() }));
+function stars(t) {
+  STARS.forEach((s, k) => { cx.fillStyle = (k * 7 + Math.floor(t * 6)) % 11 === 0 ? P.fg : s.b > 0.6 ? P.dim : P.edge; cx.fillRect(s.x, s.y, 1, 1); });
+}
+const FIELD = Array.from({ length: 46 }, () => { const a = rng() * 6.283, d = Math.sqrt(rng()) * 66; return { x: Math.round(X + Math.cos(a) * d), y: Math.round(OY + Math.sin(a) * d), b: rng() }; });
+
+// ---------- the planet ----------
+// A banded blue giant lit from direction dir. Its cloud bands stream east (to the right), fastest at the equator
+// where the jet blows; o.rain adds glass streaking sideways across it; o.therm swaps in the false-colour heat map
+// (a top-down view, hot spot 16 deg east of the point facing the star). The limb glows on every chord.
+function planet(x, y, r, t, o = {}) {
+  x = Math.round(x); y = Math.round(y); r = Math.max(1, Math.round(r));
+  const dir = o.dir ?? Math.PI, lz = o.lz ?? 0.35, n0 = Math.hypot(1, lz), lx = Math.cos(dir) / n0, ly = Math.sin(dir) / n0, lzz = lz / n0;
+  const glow = o.glow ?? 1, ce = pulse('chd', t, 4), spin = t * 0.5;
+  if (o.halo) {
+    ditherCircle(x, y, r, r + 6, P.chdD, 0.5 * o.halo);
+    ring(x, y, r + 1, P.chd, 1, o.halo * (0.3 + 0.6 * ce));
+  }
+  const rr = (r + 0.5) ** 2, hx = Math.cos(dir + HOT), hy = Math.sin(dir + HOT);
+  for (let py = -r; py <= r; py++) {
+    for (let px = -r; px <= r; px++) {
+      if (px * px + py * py > rr) continue;
+      const u = px / r, v = clamp(py / r, -1, 1), b = (bay(x + px, y + py) - 7.5) / 16;
+      let col;
+      if (o.therm) {
+        const h = (1 + u * hx + v * hy) / 2 + b * 0.25;
+        col = TCOL[clamp(Math.floor(h * 4.4 - 0.4), 0, 4)];
+      } else {
+        const z = Math.sqrt(Math.max(0, 1 - u * u - v * v)), lat = Math.asin(v), lon = Math.atan2(u, z), jet = Math.cos(lat) ** 4;
+        const band = Math.sin(lat * 11 + 0.8 * Math.sin(lon * 3 - spin * (0.4 + 1.6 * jet))) + 0.35 * Math.sin(lat * 23 - lon * 2 + spin * jet);
+        const l = u * lx + v * ly + z * lzz + b * 0.15;
+        if (l < 0) col = P.night;
+        else {
+          const sh = l * glow * (0.9 + 0.2 * ce);
+          let lv = sh > 0.7 ? 3 : sh > 0.38 ? 2 : sh > 0.12 ? 1 : 0;
+          if (band > 0.75) lv++; else if (band < -0.8) lv--;
+          col = PCOL[clamp(lv, 0, 4)];
+        }
+      }
+      cx.fillStyle = col; cx.fillRect(x + px, y + py, 1, 1);
+    }
+  }
+  if (o.rain) {
+    // glass streaking east across the disc, faster near the equator
+    const n = Math.round(r * 0.6 * o.rain);
+    for (let k = 0; k < n; k++) {
+      const v = (hash(k * 3 + 1) * 1.7 - 0.85), jet = (1 - v * v) ** 2, sp = (0.25 + 0.5 * hash(k * 5 + 2)) * (0.3 + jet);
+      const span = 2 * r + 14, hx0 = ((hash(k * 7 + 3) * span + t * sp * r * 1.2 * (o.rspeed ?? 1)) % span) - r - 7, hyy = Math.round(y + v * r);
+      for (let j = 0; j < 5; j++) {
+        const px = Math.round(x + hx0 - j), dx = px - x, dy = hyy - y;
+        if (dx * dx + dy * dy > r * r) continue;
+        dot(px, hyy, j === 0 ? P.glassL : P.glass, 1 - j / 5);
+      }
+    }
+  }
+}
+
+function jupiter(x, y, r) {
+  for (let py = -r; py <= r; py++) {
+    for (let px = -r; px <= r; px++) {
+      if (px * px + py * py > (r + 0.5) ** 2) continue;
+      const v = py / r, u = px / r, n = Math.sin(v * 13 + 0.4 * Math.sin(u * 4)) + 0.3 * Math.sin(v * 31);
+      let col = n > 0.5 ? P.jupL : n > -0.4 ? P.jup : P.jupD;
+      if (Math.hypot(u - 0.3, (v - 0.35) * 1.8) < 0.18) col = P.acidD;   // the Great Red Spot
+      if (u > 0.3 && bay(x + px, y + py) < (u - 0.3) * 18) col = P.night;
+      cx.fillStyle = col; cx.fillRect(x + px, y + py, 1, 1);
+    }
+  }
+}
+
+// expanding rings from the star, one per kick
+function kickShells(t, s, x0, y0, r0 = 10) {
+  for (let k = 0; k < 40; k++) {
+    if (!hit('kick', s - k)) continue;
+    const dt = t - (s - k) * STEP, r = r0 + dt * 90;
+    if (r > 160) break;
+    ring(x0, y0, r, k < 4 ? P.kick : P.kickD, 1, 0.55 * (1 - r / 160));
+  }
+}
+
+// the hats' place in the stereo field: each bar they sweep from hard left (west) to hard right (east)
+const hatPan = s => -0.85 + 1.7 * (((s % 16) + 16) % 16) / 15;
+// glass beads: every hat throws two from where it sits in the stereo field, and the wind carries them east
+function beads(t, s, o = {}) {
+  const vx = o.vx ?? 140, y0 = o.y0 ?? 40, y1 = o.y1 ?? 190, len = o.len ?? 7;
+  for (let k = 0; k < 14; k++) {
+    const st = s - k;
+    if (!hit('hat', st)) continue;
+    const age = t - st * STEP;
+    for (let j = 0; j < 2; j++) {
+      const x0 = 90 + hatPan(st) * 95 - 20 * j, y = Math.round(y0 + hash(st * 3 + j) * (y1 - y0) + age * 14), x = Math.round(x0 + age * vx);
+      if (x - len > W) continue;
+      line(x - len, y - 1, x - 1, y, P.glass, 0.8 * (1 - k / 14));
+      cx.fillStyle = age < 0.1 ? P.white : P.glassL; cx.fillRect(x, y, 1, 1);
+    }
+  }
+}
+// background wind: faint streaks blowing east at speed sp
+function windLines(t, sp, d = 0.4, y0 = 34, y1 = 196) {
+  for (let k = 0; k < 26; k++) {
+    const y = Math.round(y0 + hash(k * 11) * (y1 - y0)), L = 6 + hash(k * 13) * 14, span = W + 40;
+    const x = ((hash(k * 17) * span + t * sp * (0.6 + hash(k * 19))) % span) - 20;
+    line(x - L, y, x, y, P.edge, d);
+  }
+}
+// a deep cloud deck seen from inside, lighter at the top, scrolling east, the upper layers fastest
+function clouds(t, y0, y1, sp = 1) {
+  for (let y = y0; y < y1; y++) {
+    const dp = (y - y0) / (y1 - y0), off = t * sp * (70 - 50 * dp);
+    for (let x = 0; x < W; x++) {
+      const n = Math.sin(y * 0.33 + 2.2 * Math.sin((x - off) * 0.04 + y * 0.09)) * 0.5 + 0.5;
+      const lv = Math.floor(n * 1.6 + (1 - dp) * 2.2 + (bay(x, y) - 7.5) / 16);
+      cx.fillStyle = PCOL[clamp(lv, 0, 3)]; cx.fillRect(x, y, 1, 1);
+    }
+  }
+}
+
+// ---------- audio (everything synthesised) ----------
+const { G, F, chain, pan, osc, env, play, noise, warm } = Engine.audio;
+let master, secGain, comp, duck, kickIn, bassIn, acidIn, percIn, chdIn, leadIn, fxSend, revSend;
+
+function buildGraph(ac, out) {
+  master = out;
+  comp = ac.createDynamicsCompressor();
+  comp.threshold.value = -14; comp.knee.value = 6; comp.ratio.value = 4; comp.attack.value = 0.003; comp.release.value = 0.15;
+  secGain = G(0.8);   // section level: the drop gets the headroom
+  chain(comp, secGain, master);
+  // sidechain bus: bass, acid, chords and lead pump against the kick
+  duck = G(1); duck.connect(comp);
+  // ping-pong echo, dotted eighth
+  const dl = ac.createDelay(1), dr = ac.createDelay(1);
+  dl.delayTime.value = dr.delayTime.value = STEP * 3;
+  const fbl = G(0.4), fbr = G(0.4), lpl = F('lowpass', 3200), lpr = F('lowpass', 2600);
+  fxSend = G(1);
+  const merge = ac.createChannelMerger(2);
+  chain(fxSend, dl, lpl, fbl, dr, lpr, fbr, dl);
+  lpl.connect(merge, 0, 0); lpr.connect(merge, 0, 1);
+  chain(merge, G(0.45), comp);
+  // a big hall: decaying, darkened noise as the impulse
+  const len = Math.floor(ac.sampleRate * 3), ir = ac.createBuffer(2, len, ac.sampleRate);
+  for (let c = 0; c < 2; c++) {
+    const d = ir.getChannelData(c);
+    let y = 0;
+    for (let i = 0; i < len; i++) { y += 0.3 * (Math.random() * 2 - 1 - y); d[i] = y * Math.pow(1 - i / len, 3) * Math.min(1, i / (ac.sampleRate * 0.015)); }
+  }
+  const conv = ac.createConvolver(); conv.buffer = ir;
+  revSend = G(1);
+  chain(revSend, F('highpass', 250), conv, G(0.7), comp);
+  kickIn = G(0.62); chain(kickIn, warm(2.2), comp);
+  bassIn = G(1); chain(bassIn, F('lowpass', 700), G(0.42), duck);
+  acidIn = G(1); chain(acidIn, warm(3), G(0.2), duck);
+  acidIn.connect(G(0.06)).connect(fxSend);
+  percIn = G(0.8); percIn.connect(comp);
+  chdIn = G(1); chain(chdIn, G(0.34), duck);
+  chdIn.connect(G(0.3)).connect(fxSend);
+  chdIn.connect(G(0.4)).connect(revSend);
+  leadIn = G(1); chain(leadIn, G(0.3), duck);
+  leadIn.connect(G(0.35)).connect(fxSend);
+  leadIn.connect(G(0.5)).connect(revSend);
+}
+
+// techno kick: long sine dive with a click; ducks the melodic bus
+function kick(t, vel) {
+  const o = osc('sine', 160, t), g = G(1);
+  o.frequency.exponentialRampToValueAtTime(44, t + 0.11);
+  env(g, t, vel, 0.001, 0.38, 0.3);
+  chain(o, g, kickIn); play(o, t, 0.38);
+  const c = osc(0.5, 1400, t), cg = G(1); env(cg, t, vel * 0.18, 0.0005, 0.012);
+  chain(c, cg, kickIn); play(c, t, 0.012);
+  duck.gain.setValueAtTime(0.25, t);
+  duck.gain.setTargetAtTime(1, t + 0.03, 0.07);
+}
+// rolling bass: a 25% pulse over a sine an octave down, short and plucky
+function bass(t, m, vel) {
+  const g = G(1);
+  env(g, t, vel, 0.003, STEP * 0.95, 0.3);
+  chain(g, bassIn);
+  const o = osc(0.25, midi(m), t), s = osc('sine', midi(m - 12), t);
+  chain(o, G(0.5), g); chain(s, G(0.9), g);
+  play(o, t, STEP * 0.95); play(s, t, STEP * 0.95);
+}
+// acid: a 25% pulse and a saw through a screaming resonant lowpass; cutoff = the heat we see, accents push it, slides glide
+function acid(t, m, from, cut, accent) {
+  const dur = STEP * (from ? 1.05 : 0.8), lp = F('lowpass', cut, accent ? 16 : 11), g = G(1);
+  const peak = Math.min(9000, cut * (accent ? 4.5 : 2.4));
+  lp.frequency.setValueAtTime(peak, t); lp.frequency.exponentialRampToValueAtTime(cut, t + 0.14);
+  env(g, t, accent ? 0.9 : 0.6, 0.003, dur, 0.6);
+  chain(lp, g, acidIn);
+  for (const [w, v] of [[0.25, 0.55], ['sawtooth', 0.5]]) {
+    const o = osc(w, from ? midi(from) : midi(m), t);
+    if (from) o.frequency.exponentialRampToValueAtTime(midi(m), t + STEP * 0.6);
+    chain(o, G(v), lp); play(o, t, dur);
+  }
+}
+const metal = (t, dur, vol, hp, p = 0, dest = percIn) => Engine.audio.metal(t, dur, vol, hp, p, dest);
+// glass hat: 808 metal plus a tiny high ping, like a bead of glass ticking
+function hat(t, vel, p, s) {
+  metal(t, vel === 1 ? 0.16 : 0.035, vel === 1 ? 0.11 : 0.07, vel === 1 ? 6500 : 8500, p);
+  const f = 5200 + 3600 * hash(s * 31 + 7), o = osc('sine', f, t), g = G(1);
+  env(g, t, vel === 1 ? 0.05 : 0.03, 0.0005, 0.05);
+  chain(o, g, pan(p), percIn); play(o, t, 0.05);
+}
+function clap(t, vel) {
+  for (const d of [0, 0.011, 0.022]) noise(t + d, 0.02, 0.4 * vel, 'bandpass', 1150, percIn, 1.4);
+  noise(t + 0.033, 0.18, 0.35 * vel, 'bandpass', 1300, percIn, 1.1);
+  noise(t + 0.033, 0.3, 0.12 * vel, 'bandpass', 1500, revSend, 0.8);
+}
+function snare(t, vel) {
+  const o = osc('triangle', 240, t), g = G(1);
+  o.frequency.exponentialRampToValueAtTime(170, t + 0.05);
+  env(g, t, vel * 0.4, 0.001, 0.09);
+  chain(o, g, percIn); play(o, t, 0.09);
+  noise(t, 0.04 + 0.1 * vel, 0.45 * vel, 'bandpass', 3200, percIn, 0.8);
+}
+const crash = t => { metal(t, 1.8, 0.24, 4000, -0.3); metal(t + 0.002, 1.6, 0.18, 5000, 0.3, revSend); noise(t, 1.4, 0.12, 'highpass', 6000, percIn); };
+// chord stab: each tone two detuned 50% pulses, a snappy filter, thrown into the echo
+function stab(t, notes, vol) {
+  const lp = F('lowpass', 900, 2), g = G(1);
+  lp.frequency.setValueAtTime(4200, t); lp.frequency.exponentialRampToValueAtTime(700, t + 0.22);
+  env(g, t, vol, 0.002, 0.3, 0.2);
+  chain(lp, g, chdIn);
+  notes.forEach((m, k) => {
+    const p = pan((k / (notes.length - 1) - 0.5) * 0.8); p.connect(lp);
+    for (const det of [-10, 10]) { const o = osc(0.5, midi(m), t); o.detune.value = det; chain(o, G(0.5), p); play(o, t, 0.3); }
+  });
+}
+// the drop's pad: each tone a triangle and two wide-detuned pulses, swelling open over the bar
+function pad(t, notes, dur, vol) {
+  const rel = 1, lp = F('lowpass', 500, 1), g = G(1);
+  lp.frequency.setValueAtTime(500, t); lp.frequency.linearRampToValueAtTime(2600, t + dur * 0.6); lp.frequency.exponentialRampToValueAtTime(800, t + dur + rel);
+  g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(vol, t + Math.min(0.5, dur * 0.4));
+  g.gain.setValueAtTime(vol, t + dur); g.gain.exponentialRampToValueAtTime(0.0001, t + dur + rel);
+  chain(lp, g, chdIn);
+  notes.forEach((m, k) => {
+    const p = pan((k / (notes.length - 1) - 0.5) * 1.2); p.connect(lp);
+    for (const [w, det, v] of [['triangle', 0, 0.8], [0.25, -14, 0.25], [0.5, 14, 0.2]]) {
+      const o = osc(w, midi(m), t); o.detune.value = det; chain(o, G(v), p); play(o, t, dur + rel);
+    }
+  });
+}
+// lead: two detuned pulses with a vibrato that fades in, long echo and hall; up an octave too in the second half
+function lead(t, m, dur, vol, oct) {
+  const f = midi(m), g = G(1), rel = 0.25, lp = F('lowpass', 3600, 0.8);
+  g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(vol, t + 0.015);
+  g.gain.setValueAtTime(vol * 0.8, t + Math.max(0.03, dur - 0.02)); g.gain.exponentialRampToValueAtTime(0.0001, t + dur + rel);
+  chain(lp, g, leadIn);
+  const vib = osc('sine', 5.5, t), vg = G(0);
+  vg.gain.setValueAtTime(0, t); vg.gain.linearRampToValueAtTime(f * 0.007, t + Math.min(0.5, dur));
+  chain(vib, vg); play(vib, t, dur + rel);
+  for (const [w, det, mul, v] of [[0.25, -8, 1, 0.5], [0.5, 8, 1, 0.4], ...(oct ? [[0.125, 0, 2, 0.22]] : [])]) {
+    const o = osc(w, f * mul, t); o.detune.value = det; vg.connect(o.frequency);
+    chain(o, G(v), lp); play(o, t, dur + rel);
+  }
+}
+// arp: tiny 12.5% plucks, bouncing left and right
+function arp(t, m, p) {
+  const o = osc(0.125, midi(m), t), g = G(1);
+  env(g, t, 0.07, 0.002, STEP * 1.4);
+  chain(o, g, pan(p), leadIn); play(o, t, STEP * 1.4);
+}
+const riser = (t, dur, vol) => Engine.audio.riser(t, dur, vol, percIn);
+const impact = t => Engine.audio.impact(t, kickIn);
+// new section: two falling glass chimes into the echo
+function chime(t) {
+  for (const [m, d] of [[101, 0], [96, 0.07]]) {
+    const o = osc('triangle', midi(m), t + d), g = G(1); env(g, t + d, 0.08, 0.002, 0.25);
+    chain(o, g, percIn); g.connect(fxSend); play(o, t + d, 0.25);
+  }
+}
+
+// steps until the next hit of layer (max 16), and the previous note if it was the step just before
+function gapAfter(layer, s) { let n = 1; while (n < 16 && !hit(layer, s + n)) n++; return n; }
+
+function voices(s, t) {
+  const { id, lb, i } = at(s), ch = lb % 4, D = id === 'drop', e8 = lb % 8, ts = at(s).s * STEP;
+  if (i === 0) secGain.gain.setValueAtTime(D ? 0.95 : 0.8, t);
+  if (i === 0 && lb === 0 && !D && id !== 'title' && id !== 'outro' && id !== 'storm') chime(t);
+  if (id === 'title' && lb === 0 && i === 0) riser(t, BAR * 4, 0.4);
+  if (SHORT && s === 0) { impact(t); kick(t, 1); crash(t); stab(t, CHD[0], 0.5); }   // a Short can't open on a quiet riser
+  if (id === 'storm' && lb === 0 && i === 0) riser(t, BAR * 3.75, 1.1);
+  if (D && e8 === 7 && i === 0 && lb !== 31) riser(t, BAR * 0.97, 0.45);
+  if (i === 0 && ((D && e8 === 0) || (id === 'outro' && lb === 0))) impact(t);
+  if (hit('pad', s)) pad(t, CHD[ch], id === 'title' ? BAR * 3.6 : id === 'outro' ? BAR * 3 : BAR * 0.98, id === 'title' ? 0.06 : 0.09);
+  if (hit('kick', s)) kick(t, 1);
+  const b = hit('bass', s); if (b) bass(t, b, i % 4 === 2 ? 0.9 : 0.6);
+  const a = hit('acid', s);
+  if (a) {
+    // in the build the filter is forced open, bar by bar, whatever the planet shows
+    const cut = id === 'storm' ? ACID_LO * Math.pow(ACID_HI * 1.6 / ACID_LO, (lb * 16 + i) / 48) : acidCut(orbPhase(ts));
+    const pv = SLD[i] === 'x' ? hit('acid', s - 1) : 0;
+    acid(t, a, pv && pv !== a ? pv : 0, cut, ACC[i] === 'x');
+  }
+  const h = hit('hat', s); if (h) hat(t, h, hatPan(s), s);
+  if (hit('clap', s)) clap(t, 1);
+  const rl = hit('roll', s); if (rl) snare(t, rl);
+  if (hit('stab', s)) stab(t, CHD[ch], D ? 0.32 : 0.4);
+  const l = hit('lead', s); if (l) lead(t, l, gapAfter('lead', s) * STEP * 0.95, 0.42, lb >= 16);
+  const ar = hit('arp', s); if (ar) arp(t, ar, i % 2 ? 0.6 : -0.6);
+  if (hit('crash', s)) crash(t);
+}
+
+window.__phys = () => ({ A_KM, A_AU, MERC_X, V_KMS, K_RAD, DEPTH, STAR_DEG, SUN_DEG, wider: STAR_DEG / SUN_DEG, FLUX, T_EQ, GRAV,
+  WIND_KMH, GUST_X, SOUND_X, LAP_H, SEP_ARCMIN, ORBIT_HZ, OCT, TUNE_HZ, midi53: midi(53), KEY, CENTS, SPEEDUP,
+  acidCutMin: acidCut(0), acidCutMax: acidCut(0.5 - HOT / (2 * Math.PI)), loopSec: LOOP, bars: BAR_SEC.length, orbitsPerLoop: BAR_SEC.length / ORBIT_BARS });
+
+// ---------- HUD: the live step sequencer + the orbit clock ----------
+const ROWS = [['KIK', 'kick', P.kick, P.kickD], ['BAS', 'bass', P.bass, P.bassD], ['ACD', 'acid', P.acid, P.acidD],
+              ['HAT', 'perc', P.glass, P.glassD], ['CHD', 'chd', P.chd, P.chdD], ['LED', 'led', P.lead, P.leadD]];
+const hud = sequencer(ROWS);
+function meter(t) {
+  const ph = orbPhase(t), n = Math.floor(ph * 18), y = 234;
+  text('ORBIT', 4, y, P.bass);
+  for (let k = 0; k < 18; k++) { cx.fillStyle = k < n ? P.bass : k === n ? P.white : P.grid; cx.fillRect(26 + k * 5, y, 4, 5); }
+  text(`HR ${(ph * PERIOD_H).toFixed(1).padStart(4, '0')}/${PERIOD_H.toFixed(1)}`, 176, y, P.fg, 1, 'r');
+}
+
+// ---------- scenes ----------
+function sceneTitle(lt, t, ctl) {
+  stars(t);
+  sun(-14, 150, 34, STAR, t, 0.45);
+  planet(112, 150, 30, t, { rain: 1, halo: 0.6 });
+  card([{ t: 'HD 189733 B', s: 3, c: P.chd }, { t: 'GLASS RAIN WORLD', s: 2, c: P.glass }, { t: `PEAK-TIME CHIP TECHNO - ${BPM} BPM`, c: P.dim }], 30);
+  text(`IN ${KEY} MINOR: ITS YEAR, ${OCT} OCTAVES UP`, 90, 216, P.dim, 1, 'c');
+  const on = ((t * 2) | 0) % 2 === 0;   // song time when playing; the not-started card is passed wall-clock seconds
+  if (!ctl.started) {
+    if (on) card([{ t: 'TAP TO START', c: P.kick, s: 2 }], 250);
+    text('HEADPHONES + VOLUME UP', 90, 290, P.edge, 1, 'c');
+  } else if (on) card([{ t: `A WORLD ${PL.ly} LIGHT YEARS AWAY`, c: P.glass }], 250);
+}
+
+// sky: degrees -> px, 61 px per degree (a 2.3 degree binocular field), east to the left
+const PX_DEG = 140 / 2.3, SKY_RA0 = (SKY.ra + SKY.m27ra) / 2, SKY_DEC0 = (SKY.dec + SKY.m27dec) / 2;
+const sky = (ra, dec) => [Math.round(X - (ra - SKY_RA0) * Math.cos(SKY_DEC0 * Math.PI / 180) * PX_DEG), Math.round(OY - (dec - SKY_DEC0) * PX_DEG)];
+function sceneStar(lt, t, sec) {
+  const bar = lb(lt), s = Math.floor(t / STEP), pe = pulse('kick', t, 6);
+  if (bar < 4) {
+    stars(t);
+    fillCircle(X, OY, 70, P.bg);
+    ditherCircle(X, OY, 0, 70, P.grid, 0.6);
+    for (const f of FIELD) { cx.fillStyle = f.b > 0.8 ? P.fg : f.b > 0.4 ? P.dim : P.edge; cx.fillRect(f.x, f.y, 1, 1); }
+    ring(X, OY, 70, P.edge, 2, 1);
+    const [mx, my] = sky(SKY.m27ra, SKY.m27dec), mw = SKY.m27w * PX_DEG / 2, mh = SKY.m27h * PX_DEG / 2;
+    dEllipse(mx, my, mw, mh, 0.6, P.neb, 0.5);
+    dEllipse(mx, my, mw * 0.55, mh * 1.1, 0.6 + Math.PI / 2, P.neb, 0.9);   // the dumbbell's two lobes
+    label('M27', mx + 8, my - 2, P.neb);
+    label('DUMBBELL NEBULA', mx + 8, my + 6, P.dim);
+    const [x, y] = sky(SKY.ra, SKY.dec), rr = 5 + Math.round(2 * pe);
+    cx.fillStyle = P.kickL; cx.fillRect(x, y, 1, 1);
+    cx.fillStyle = P.kick; cx.fillRect(x - 1, y, 3, 1); cx.fillRect(x, y - 1, 1, 3);
+    for (const [sx, sy] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) { line(x + sx * rr, y + sy * rr, x + sx * (rr - 2), y + sy * rr, P.kick); line(x + sx * rr, y + sy * rr, x + sx * rr, y + sy * (rr - 2), P.kick); }
+    label('HD 189733', x - 9, y - 12, P.kick, 'r');
+  } else {
+    stars(t);
+    kickShells(t, s, X, OY - 4, 34);
+    sun(X, OY - 4, 32, STAR, t, 0.35 + 0.35 * pe);
+    label(`${fmtBig(PL.tStar)} K`, X, OY + 40, pe > 0.5 ? P.white : P.kick, 'c');
+  }
+  banner('1. THE STAR', 'LAYER 1: KICK', P.kick);
+  fact(bar < 4 ? ['ITS STAR: HD 189733', { t: `${PL.ly} LIGHT YEARS AWAY`, c: P.kick }, { t: `${Math.round(SEP_ARCMIN)} ARCMIN FROM THE DUMBBELL`, c: P.dim }]
+               : ['AN ORANGE K DWARF', { t: `${fmtBig(PL.tStar)} K, ${PL.rStarSun}X THE SUN'S WIDTH`, c: P.kick }, { t: `MAGNITUDE ${PL.mag}: SEE IT IN BINOCULARS`, c: P.dim }], P.kick);
+  timeline(bar < 4 ? 'BINOCULAR VIEW, 2.3 DEG. TO SCALE' : 'SCHEMATIC: 1 KICK = 1 PULSE');
+}
+
+// transit, slowed: the planet crosses the star once every 2 bars, a measurement on every bass note
+const TR_LEN = 2 * BAR, TR_R = 26, TR_X = X, TR_Y = 82;
+function overlap(d, R, r) {   // area shared by circles of radius R and r, centres d apart
+  if (d >= R + r) return 0;
+  if (d <= R - r) return Math.PI * r * r;
+  const a = r * r * Math.acos((d * d + r * r - R * R) / (2 * d * r)), b = R * R * Math.acos((d * d + R * R - r * r) / (2 * d * R));
+  return a + b - 0.5 * Math.sqrt((-d + r + R) * (d + r - R) * (d - r + R) * (d + r + R));
+}
+const trX = f => TR_X + (f - 0.5) * 200;                     // planet x across the window, f = 0..1
+const trFlux = f => 1 - overlap(Math.hypot(trX(f) - TR_X, PL.impact * TR_R), TR_R, K_RAD * TR_R) / (Math.PI * TR_R * TR_R);
+function sceneOrbit(lt, t, sec) {
+  stars(t);
+  const bar = lb(lt), s = Math.floor(t / STEP);
+  if (bar < 4) {
+    const R = 56, a = orbAng(t), px = X + Math.cos(a) * R, py = OY + Math.sin(a) * R;
+    sun(X, OY, Math.max(2, Math.round(R * RSTAR_KM / A_KM)), STAR, t, 0.35 + 0.3 * pulse('kick', t, 6));
+    ring(X, OY, R, P.bassD, 1, 0.9);
+    // every bass note leaves a tick where the planet was
+    for (let k = 0; k < 32; k++) {
+      const st = s - k;
+      if (!hit('bass', st)) continue;
+      const b = orbAng(st * STEP), c = Math.cos(b), sn = Math.sin(b);
+      line(X + c * (R + 2), OY + sn * (R + 2), X + c * (R + 5), OY + sn * (R + 5), k === 0 ? P.white : P.bass, 1 - k / 32);
+    }
+    for (let k = 1; k < 14; k++) { const b = a - k * 0.06; dot(X + Math.cos(b) * R, OY + Math.sin(b) * R, P.chd, 1 - k / 14); }
+    fillCircle(Math.round(px), Math.round(py), 2, P.chd);
+    text('0 HR', X + 14, OY + R + 2, P.bass);
+    text(`${(PERIOD_H / 2).toFixed(1)} HR`, X + 10, OY - R - 7, P.bass);
+    arrow(X, OY + R + 8, X, OY + R + 15, P.dim);
+    text('TO EARTH', X, OY + R + 19, P.dim, 1, 'c');
+  } else {
+    const f = (lt % TR_LEN) / TR_LEN, rp = K_RAD * TR_R;
+    sun(TR_X, TR_Y, TR_R, STAR, t, 0.35);
+    fillCircle(Math.round(trX(f)), Math.round(TR_Y + PL.impact * TR_R), Math.max(1, Math.round(rp)), P.night);
+    ring(Math.round(trX(f)), Math.round(TR_Y + PL.impact * TR_R), Math.round(rp), P.chd, 1, 0.8);
+    // the light curve: the smooth model, and a measurement on every bass note so far (dip exaggerated)
+    const gx0 = 14, gx1 = 166, gy = 140, sc = 22 / DEPTH, w0 = s - Math.floor((lt % TR_LEN) / STEP);
+    cx.fillStyle = P.edge; cx.fillRect(gx0, gy - 1, gx1 - gx0, 1);
+    for (let x = gx0; x <= gx1; x++) dot(x, gy + (1 - trFlux((x - gx0) / (gx1 - gx0))) * sc, P.bassD, 1);
+    for (let st = w0; st <= s; st++) {
+      if (!hit('bass', st)) continue;
+      const ff = ((st - w0) * STEP) / TR_LEN, x = Math.round(gx0 + ff * (gx1 - gx0)), y = Math.round(gy + (1 - trFlux(ff)) * sc + (hash(st) - 0.5) * 3);
+      cx.fillStyle = st === s ? P.white : P.bass; cx.fillRect(x, y, 2, 2);
+    }
+    text('BRIGHTNESS', gx0, gy - 9, P.dim);
+    text(`-${fmtNum(DEPTH * 100)}%`, gx1, gy + 26, P.bass, 1, 'r');
+  }
+  banner('2. THE ORBIT', 'LAYER 2: ROLLING BASS', P.bass);
+  fact(bar < 4 ? [`A YEAR LASTS ${PERIOD_H.toFixed(1)} HOURS`, { t: `ONLY ${rough(A_KM / 1e6)} MILLION KM FROM ITS STAR`, c: P.bass }, { t: `${fmtNum(MERC_X)}X CLOSER THAN MERCURY`, c: P.dim }]
+               : ['IT CROSSES IN FRONT OF ITS STAR', { t: `DIMMING IT BY ${fmtNum(DEPTH * 100)}%`, c: P.bass }, { t: `SPOTTED THAT WAY IN ${PL.found}`, c: P.dim }], P.bass);
+  timeline(bar < 4 ? `STAR + ORBIT TO SCALE. ~${rough(SPEEDUP)}X FAST` : 'SLOWED. 1 BASS NOTE = 1 MEASUREMENT');
+}
+
+// heat map: longitude -180..180 (star-facing point at 0) by latitude, false colour
+const MAP = { x0: 10, y0: 54, w: 160, h: 80 };
+function heatMap(t) {
+  const { x0, y0, w, h } = MAP, ae = pulse('acid', t, 9);
+  for (let py = 0; py < h; py++) {
+    const lat = (0.5 - (py + 0.5) / h) * Math.PI;
+    for (let px = 0; px < w; px++) {
+      const lon = ((px + 0.5) / w - 0.5) * 2 * Math.PI, b = (bay(x0 + px, y0 + py) - 7.5) / 16;
+      const f = Math.max(0, Math.cos(lon - HOT)) * Math.cos(lat), tail = 0.18 * Math.max(0, Math.cos((lon - 1.6) / 1.6)) * Math.cos(lat);
+      const v = 0.12 + 0.88 * Math.pow(f, 0.8) * (0.92 + 0.12 * ae) + tail + b * 0.2;
+      cx.fillStyle = TCOL[clamp(Math.floor(v * 4.6 - 0.2), 0, 4)]; cx.fillRect(x0 + px, y0 + py, 1, 1);
+    }
+  }
+  cx.fillStyle = P.edge;
+  cx.fillRect(x0 - 1, y0 - 1, w + 2, 1); cx.fillRect(x0 - 1, y0 + h, w + 2, 1); cx.fillRect(x0 - 1, y0, 1, h); cx.fillRect(x0 + w, y0, 1, h);
+  // the jet: chevrons streaming east along the equator
+  for (let k = 0; k < 8; k++) {
+    const x = x0 + ((k * 20 + t * 26) % w), y = y0 + h / 2 + 18;
+    line(x, y - 2, x + 2, y, P.fg, 0.6); line(x + 2, y, x, y + 2, P.fg, 0.6);
+  }
+  const sx = x0 + w / 2, hx = Math.round(sx + PL.hotDeg / 360 * w);
+  for (let y = y0 - 4; y < y0; y++) { cx.fillStyle = P.kick; cx.fillRect(sx, y, 1, 1); }
+  text('STAR', sx, y0 - 10, P.kick, 1, 'r');
+  for (let y = y0 + h; y < y0 + h + 4; y++) { cx.fillStyle = P.acidL; cx.fillRect(hx, y, 1, 1); }
+  text(`HOT SPOT, ${PL.hotDeg} DEG EAST`, hx - 4, y0 + h + 6, P.acidL);
+  label('NIGHT', x0 + 3, y0 + 3, P.dim); label('NIGHT', x0 + w - 3, y0 + 3, P.dim, 'r');
+  label('EAST', x0 + w - 3, y0 + h - 8, P.fg, 'r');
+}
+function sceneHeat(lt, t, sec) {
+  stars(t);
+  const bar = lb(lt), ph = orbPhase(t);
+  if (bar < 4) heatMap(t);
+  else {
+    // top-down orbit, Earth below: the planet's hot face, and how much of it we see
+    const ox = 46, oy = 92, R = 30, a = orbAng(t), px = ox + Math.cos(a) * R, py = oy + Math.sin(a) * R;
+    sun(ox, oy, 5, STAR, t, 0.3);
+    ring(ox, oy, R, P.bassD, 1, 0.8);
+    planet(px, py, 7, t, { therm: 1, dir: a + Math.PI });
+    arrow(ox, oy + R + 12, ox, oy + R + 22, P.dim);
+    text('EARTH', ox, oy + R + 26, P.dim, 1, 'c');
+    // the phase curve over one orbit, a cursor at now
+    const gx0 = 92, gx1 = 172, gy0 = 56, gy1 = 116;
+    cx.fillStyle = P.edge; cx.fillRect(gx0, gy1, gx1 - gx0 + 1, 1); cx.fillRect(gx0, gy0, 1, gy1 - gy0);
+    for (let x = gx0; x <= gx1; x++) dot(x, gy1 - heatSeen((x - gx0) / (gx1 - gx0)) * (gy1 - gy0 - 6), P.acidD, 1);
+    const cxp = Math.round(gx0 + ph * (gx1 - gx0)), cyp = Math.round(gy1 - heatSeen(ph) * (gy1 - gy0 - 6));
+    for (let y = gy0; y < gy1; y += 2) dot(cxp, y, P.dim, 1);
+    fillCircle(cxp, cyp, 2, pulse('acid', t, 9) > 0.5 ? P.white : P.acid);
+    text('ECLIPSE', (gx0 + gx1) / 2, gy1 + 4, P.dim, 1, 'c');
+    text(`${PL.tDay}`, gx0 + 2, gy0 - 8, P.acidL); text(`${PL.tNight} K`, gx0 + 2, gy1 - 7, P.acidD);
+    label(`WE SEE ${Math.round(tSeen(ph))} K`, 132, 140, P.acidL, 'c');
+    label(`ACID FILTER ${Math.round(acidCut(ph))} HZ`, 132, 152, P.acid, 'c');
+  }
+  banner('3. THE HEAT', 'LAYER 3: ACID LINE', P.acid);
+  fact(bar < 4 ? ['TIDALLY LOCKED: ONE FACE', { t: 'FOREVER TURNED TO ITS STAR', c: P.acid }, { t: `WIND PUSHES THE HOT SPOT EAST`, c: P.dim }]
+               : [`DAY ~${PL.tDay} K, NIGHT ~${PL.tNight} K`, { t: 'THE FILTER OPENS AS DAY TURNS TO US', c: P.acid }, { t: '(SPITZER, KNUTSON + TEAM 2007)', c: P.dim }], P.acid);
+  timeline(bar < 4 ? 'HEAT MAP: FALSE COLOUR. SCHEMATIC' : 'ACID FILTER = THE REAL PHASE CURVE');
+}
+
+function sceneRain(lt, t, sec) {
+  const bar = lb(lt), s = Math.floor(t / STEP), ce = pulse('clap', t, 10);
+  clouds(t, 34, 197, 1);
+  windLines(t, 90 + 60 * ce, 0.5);
+  beads(t, s);
+  if (ce > 0.4) for (let k = 0; k < 6; k++) { const y = 50 + Math.round(hash(Math.floor(t / BEAT) * 9 + k) * 130); line(0, y, W, y, P.chdL, 0.25 * ce); }   // gusts on the claps
+  // where the hats sit in the stereo field, right now
+  const y = 40, px = Math.round(90 + hatPan(s) * 80);
+  label('W', 6, y, P.dim); label('E', 170, y, P.dim);
+  for (let x = 12; x < 168; x += 3) dot(x, y + 2, P.glassD, 1);
+  if (hit('hat', s) || pulse('hat', t, 8) > 0.2) fillCircle(px, y + 2, 2, P.glass);
+  if (bar >= 4) label(`~${fmtBig(WIND_KMH)} KM/H`, 90, 182, ce > 0.5 ? P.white : P.glassL, 'c');
+  banner('4. GLASS RAIN', 'LAYER 4: GLASS HATS + CLAP', P.glass);
+  fact(bar < 4 ? ['ITS CLOUDS MAY HOLD SILICATES', { t: 'THE STUFF GLASS IS MADE OF', c: P.glass }, { t: 'BEADS CONDENSED FROM ROCK VAPOUR', c: P.dim }]
+               : [`WINDS OF ~${fmtNum(PL.windKms)} KM PER SECOND`, { t: 'BLOW THE GLASS RAIN SIDEWAYS', c: P.glass }, { t: 'HEADPHONES: IT PANS EAST', c: P.dim }], P.glass);
+  timeline('SCHEMATIC. 1 HAT = 1 GLASS BEAD');
+}
+
+// visible spectrum, 300-600 nm across the screen
+const SP = { x0: 20, x1: 160, l0: 300, l1: 600, base: 160 };
+const lamX = l => Math.round(SP.x0 + (l - SP.l0) / (SP.l1 - SP.l0) * (SP.x1 - SP.x0));
+const lamCol = l => l < 380 ? P.edge : l < 440 ? P.sv : l < 490 ? P.chd : l < 510 ? P.glass : l < 570 ? P.sg : l < 590 ? P.sy : P.so;
+function sceneBlue(lt, t, sec) {
+  stars(t);
+  const bar = lb(lt), ce = pulse('chd', t, 5);
+  if (bar < 4) {
+    sun(-30, OY, 34, STAR, t, 0.4);
+    planet(100, OY, 56, t, { rain: 0.6, halo: 1 });
+  } else {
+    const k = 200;
+    for (const [l0, l1, v, txt, col, up] of [[290, 450, PL.albBlue, `${Math.round(PL.albBlue * 100)}%`, P.chd, 0], [450, 570, PL.albRed, `<${Math.round(PL.albRed * 100)}%`, P.sg, 1]]) {
+      const x0 = lamX(Math.max(l0, SP.l0)), x1 = lamX(l1) - 2, h = Math.round(v * k + (up ? 0 : ce * 4));
+      cx.fillStyle = up ? P.grid : col; cx.fillRect(x0, SP.base - h, x1 - x0, h);
+      if (up) for (let x = x0; x < x1; x += 3) { cx.fillStyle = col; cx.fillRect(x, SP.base - h, 2, 1); }   // dashed: an upper limit
+      text(txt, (x0 + x1) / 2, SP.base - h - 8, up ? col : ce > 0.5 ? P.white : P.chdL, 1, 'c');
+    }
+    for (let x = SP.x0; x <= SP.x1; x++) { const l = SP.l0 + (x - SP.x0) / (SP.x1 - SP.x0) * (SP.l1 - SP.l0); cx.fillStyle = lamCol(l); cx.fillRect(x, SP.base + 2, 1, 4); }
+    text('300', SP.x0, SP.base + 9, P.dim, 1, 'c'); text('450', lamX(450), SP.base + 9, P.dim, 1, 'c'); text('600 NM', SP.x1, SP.base + 9, P.dim, 1, 'c');
+    text('UV', lamX(330), SP.base + 16, P.edge, 1, 'c');
+    text('LIGHT REFLECTED', SP.x0, 58, P.dim);
+    planet(150, 68, 12, t, { halo: 0.5 });
+  }
+  banner('5. THE BLUE', 'LAYER 5: CHORD STABS', P.chd, P.fg);
+  fact(bar < 4 ? [`HUBBLE ${PL.blue}: ITS TRUE COLOUR`, { t: 'A DEEP COBALT BLUE', c: P.chd }, { t: 'LIKE EARTH FROM SPACE. NOT WATER', c: P.dim }]
+               : [`IT REFLECTS ${Math.round(PL.albBlue * 100)}% OF BLUE LIGHT`, { t: `UNDER ${Math.round(PL.albRed * 100)}% OF GREEN + YELLOW`, c: P.chd }, { t: '(EVANS + TEAM, 2013)', c: P.dim }], P.chd);
+  timeline(bar < 4 ? 'ARTIST VIEW. COLOUR FROM HUBBLE' : 'HUBBLE MEASUREMENT. 1 STAB = 1 FLASH');
+}
+
+// the wind gauge, on a log scale from 100 to 10,000 km/h
+const gaugeX = v => Math.round(14 + 152 * (Math.log10(Math.max(100, v)) - 2) / 2);
+function sceneStorm(lt, t, sec) {
+  const s = Math.floor(t / STEP), last = lb(lt) === sec.bars - 1;
+  if (last && Math.floor((lt % BAR) / BEAT) === 3) {   // the silent beat
+    stars(t);
+    planet(X, OY, 40, t, { rain: 1, halo: 0.4, dir: Math.PI * 0.8 });
+    label('GLASS STORM', 90, 170, P.white, 'c');
+    return;
+  }
+  const p = clamp(lt / (3.75 * BAR), 0, 1), v = 100 * Math.pow(WIND_KMH / 100, smooth(p)), re = pulse('roll', t, 14);
+  clouds(t * (1 + 3 * p), 34, 197, 1 + 2 * p);
+  windLines(t, 80 + 500 * p, 0.6);
+  beads(t, s, { vx: 140 + 600 * p, len: 7 + Math.round(20 * p) });
+  // gauge
+  const gy = 60;
+  cx.fillStyle = P.bg; cx.fillRect(8, gy - 16, 164, 46);
+  cx.fillStyle = P.grid; cx.fillRect(14, gy, 152, 5);
+  cx.fillStyle = re > 0.5 ? P.white : P.glass; cx.fillRect(14, gy, gaugeX(v) - 14, 5);
+  for (const [vv, txt, up] of [[EARTH_GUST_KMH, 'EARTH RECORD', 1], [SOUND_KMH, 'SOUND', 0], [NEPTUNE_KMH, 'NEPTUNE', 1], [WIND_KMH, 'HD 189733 B', 0]]) {
+    const x = gaugeX(vv);
+    cx.fillStyle = v >= vv ? P.fg : P.dim; cx.fillRect(x, gy - 2, 1, 9);
+    text(txt, clamp(x, 10 + textW(txt, 1) / 2, 170 - textW(txt, 1) / 2), up ? gy - 9 : gy + 10, v >= vv ? P.fg : P.dim, 1, 'c');
+  }
+  label(`WIND ${fmtBig(Math.round(v / 10) * 10)} KM/H`, 90, gy + 20, P.glassL, 'c');
+  banner('6. THE STORM', 'BUILD: SNARE ROLL + RISER', P.glass);
+  fact(['THE WIND KEEPS RISING...', { t: `${fmtNum(GUST_X)}X EARTH'S RECORD GUST`, c: P.glass }, { t: `${fmtNum(SOUND_X)}X THE SPEED OF SOUND ON EARTH`, c: P.dim }], P.glass);
+  timeline('WIND GAUGE: LOG SCALE');
+  countdown(lt, sec, () => {}, 90, 140);
+}
+
+// --- the drop: four 8-bar parts ---
+function dropStorm(plt, t, s, e8, col) {
+  stars(t);
+  sun(-16, OY, 44, STAR, t, 0.5);
+  kickShells(t, s, -16, OY, 46);
+  windLines(t, 260, 0.5);
+  planet(116, OY, 42, t, { rain: 1.4, rspeed: 2, halo: 0.6 + 0.4 * pulse('lead', t, 2) });
+  beads(t, s, { vx: 260, len: 12 });
+  return { title: '7. GLASS STORM',
+    lines: e8 < 4 ? [`WINDS OF ${fmtBig(WIND_KMH)} KM/H`, { t: `${fmtNum(GUST_X)}X EARTH'S STRONGEST GUST`, c: col }, { t: 'IT RAINS GLASS, SIDEWAYS', c: P.dim }]
+                  : [`ITS STAR LOOMS ${Math.round(STAR_DEG / SUN_DEG)}X WIDER`, { t: 'THAN OUR SUN IN OUR SKY', c: col }, { t: `${rough(FLUX)}X THE SUNLIGHT EARTH GETS`, c: P.dim }],
+    time: 'ARTIST VIEW. SIZES NOT TO SCALE' };
+}
+
+// JWST transmission spectrum, schematic: bumps where molecules absorb, 2-5 um
+const MOL = [['H2O', 2.75, 0.9, 0.16, 'glass'], ['H2S', 3.75, 0.5, 0.1, 'lead'], ['CO2', 4.3, 1.1, 0.07, 'bass'], ['CO', 4.65, 0.55, 0.09, 'kick']];
+const specY = um => MOL.reduce((y, [, c, a, w]) => y + a * Math.exp(-(((um - c) / w) ** 2)), 0);
+function dropEggs(plt, t, s, e8, col) {
+  stars(t);
+  const gx0 = 16, gx1 = 164, gy = 150, show = clamp(plt / (2 * BAR), 0, 1), le = pulse('lead', t, 2);
+  planet(150, 54, 12, t, { halo: 0.6, dir: Math.PI * 0.8 });
+  cx.fillStyle = P.edge; cx.fillRect(gx0, gy + 1, gx1 - gx0, 1);
+  for (let x = gx0; x <= gx0 + (gx1 - gx0) * show; x++) {
+    const um = 2 + 3 * (x - gx0) / (gx1 - gx0), y = gy - specY(um) * 50;
+    dot(x, y, P.fg, 1);
+    if ((x & 3) === 0) { const st = Math.floor(x / 4); cx.fillStyle = P.dim; cx.fillRect(x, Math.round(y + (hash(st) - 0.5) * 6), 1, 1); }
+  }
+  MOL.forEach(([name, c, a, , cc], k) => {
+    const x = Math.round(gx0 + (c - 2) / 3 * (gx1 - gx0)), y = Math.round(gy - a * 50);
+    if (x > gx0 + (gx1 - gx0) * show) return;
+    const hot = name === 'H2S';
+    label(name, x, y - 10 - (hot ? Math.round(2 * le) : 0), hot ? (le > 0.5 ? P.white : P.lead) : P[cc], 'c');
+  });
+  text('2', gx0, gy + 5, P.dim, 1, 'c'); text('5 UM', gx1, gy + 5, P.dim, 1, 'c'); text('WAVELENGTH', 90, gy + 5, P.edge, 1, 'c');
+  return { title: '8. ROTTEN EGGS',
+    lines: e8 < 4 ? [`JWST ${PL.h2s}: HYDROGEN SULFIDE`, { t: 'IT WOULD SMELL OF ROTTEN EGGS', c: col }, { t: '(FU + TEAM, 2024)', c: P.dim }]
+                  : ['WATER, CO2 AND CO TOO', { t: 'THE FIRST H2S SEEN ON AN EXOPLANET', c: col }, { t: 'CLUES TO HOW GIANT PLANETS FORM', c: P.dim }],
+    time: 'SCHEMATIC SPECTRUM' };
+}
+
+function dropFlare(plt, t, s, e8, col) {
+  stars(t);
+  const fl = Math.exp(-plt * 1.2), px = 112, py = OY - 6;
+  sun(-20, OY, 46, STAR, t, 0.45 + 0.5 * fl);
+  if (!CALM) ditherCircle(-20, OY, 46, 46 + 30 + 60 * fl, P.kickL, 0.5 * fl);
+  // the escaping air: a tail streaming away from the star, curving back along the orbit
+  for (let k = 0; k < 90; k++) {
+    const ag = (t * 0.45 + hash(k * 3)) % 1, sp = (hash(k * 7) - 0.5);
+    const x = px + 8 + ag * 80, y = py + sp * (6 + ag * 50) + ag * ag * 26;
+    dot(x, y, ag < 0.3 ? P.chdL : ag < 0.7 ? P.chd : P.chdD, (1 - ag) * (0.7 + 0.3 * pulse('lead', t, 2)));
+  }
+  ditherCircle(px, py, 18, 26, P.chdD, 0.45);
+  planet(px, py, 18, t, { rain: 0.8, halo: 0.6, dir: Math.PI });
+  label(`>${fmtBig(PL.lossT)} T/S`, 172, py + 44, col, 'r');
+  return { title: '9. BLOWING AWAY',
+    lines: e8 < 4 ? [`HUBBLE ${PL.flare}: A FLARE HIT IT`, { t: 'ITS AIR BOILED OFF INTO SPACE', c: col }, { t: `AT LEAST ${fmtBig(PL.lossT)} TONNES A SECOND`, c: P.dim }]
+                  : ['A COMET-LIKE TAIL OF GAS', { t: `GRAVITY ${fmtNum(GRAV)}X EARTH'S CAN'T HOLD IT`, c: col }, { t: '(LECAVELIER + TEAM, 2012)', c: P.dim }],
+    time: 'SCHEMATIC. NOT TO SCALE' };
+}
+
+function dropJupiter(plt, t, s, e8, col) {
+  stars(t);
+  const rj = 26, rp = Math.round(rj * PL.rJup);
+  kickShells(t, s, 128, OY, rp + 4);
+  jupiter(46, OY, rj);
+  planet(128, OY, rp, t, { rain: 1, halo: 0.8, dir: Math.PI * 0.85 });
+  text('JUPITER', 46, OY + rp + 10, P.jupL, 1, 'c');
+  text('HD 189733 B', 128, OY + rp + 10, P.chdL, 1, 'c');
+  return { title: '10. VS JUPITER',
+    lines: e8 < 4 ? [`${fmtNum(PL.rJup)}X JUPITER'S WIDTH`, { t: `${fmtNum(PL.mJup)}X ITS MASS`, c: col }, { t: `YEAR: ${Math.round(PERIOD_H)} HOURS. JUPITER'S: ${Math.round(JUP_YEARS)} YEARS`, c: P.dim }]
+                  : [`${PL.ly} LIGHT YEARS AWAY`, { t: 'BLUE, BURNING AND HOWLING', c: col }, { t: 'WHERE IT RAINS GLASS, SIDEWAYS', c: P.dim }],
+    time: 'WIDTHS TO SCALE' };
+}
+
+const DROP_PARTS = [dropStorm, dropEggs, dropFlare, dropJupiter];
+function sceneDrop(lt, t, sec) {
+  const bar = lb(lt), part = bar >> 3, e8 = bar % 8, s = Math.floor(t / STEP);
+  const ke = pulse('kick', t, 8), col = CYC[Math.floor(t / BEAT) % CYC.length];
+  const r = DROP_PARTS[part](lt - part * 8 * BAR, t, s, e8, col);
+  if (!CALM) ditherFill(col, 0.06 * ke);
+  banner(r.title, 'ALL LAYERS: THE DROP!', col, col);
+  fact(r.lines, col);
+  timeline(r.time);
+}
+
+function sceneOutro(lt, t, sec) {
+  stars(t);
+  const f = 1 - lt / (sec.bars * BAR);
+  sun(-16, OY, 44, STAR, t, 0.5 * f);
+  planet(116, OY, 42, t, { rain: f, halo: f, glow: 0.4 + 0.6 * f });
+  banner('THE END', 'PAD + RAIN, FADING', P.chd, P.fg);
+  fact([`HD 189733 B, ${PL.ly} LY AWAY`, { t: 'BLUE, HOT, RAINING GLASS', c: P.chd }, { t: 'NUMBERS APPROXIMATE', c: P.dim }], P.chd);
+  timeline(`TUNED TO ITS YEAR: ${KEY} ${CENTS >= 0 ? '+' : '-'}${Math.round(Math.abs(CENTS))} CENTS`);
+}
+
+const SCENES = { star: sceneStar, orbit: sceneOrbit, heat: sceneHeat, rain: sceneRain, blue: sceneBlue, storm: sceneStorm, drop: sceneDrop, outro: sceneOutro };
+
+// ---------- one frame at song time tau; the engine's main loop calls it ----------
+function draw(tau) {
+  const t = tau % LOOP;
+  const bar = Math.floor(t / BAR), sec = SONG[BAR_SEC[bar]], lt = t - sec.start * BAR;
+  cx.setTransform(1, 0, 0, 1, 0, 0);
+  cx.fillStyle = P.bg; cx.fillRect(0, 0, W, H);
+  const ke = pulse('kick', t, 12), D = sec.id === 'drop';
+  if (!CALM && D && ke > 0.3) {   // screen shake on the drop's kicks
+    const s = Math.floor(t / STEP);
+    cx.setTransform(1, 0, 0, 1, Math.round((hash(s) - 0.5) * 3 * ke), Math.round((hash(s + 99) - 0.5) * 3 * ke));
+  }
+  if (sec.id === 'title') sceneTitle(lt, t, { started: true });
+  else SCENES[sec.id](lt, t, sec);
+  cx.setTransform(1, 0, 0, 1, 0, 0);
+  if (sec.id !== 'title') { meter(t); hud(t); }
+  if (lt < 0.3 && !D && sec.k > 0) ditherFill(P.bg, 1 - lt / 0.3);   // fade in each section
+  const pl = lt % (8 * BAR);
+  if (D && !CALM && pl < 0.3) ditherFill(P.white, 0.7 * (1 - pl / 0.3));
+}
+
+Engine.run({
+  clock, buildGraph, voices, draw,
+  title: sceneTitle,
+  paused: P.chd,
+  thumb: SONG.find(s => s.id === 'drop').start * BAR + 2 * BAR + 6 * STEP,   // two bars into the drop, between kicks (no flash)
+});
+})();
+</script>
+</body>
+</html>
