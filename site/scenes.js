@@ -13,4 +13,5 @@ window.SCENES = [
   {"path":"frb/","title":"Fast Radio Burst: Goa Trance Mix","desc":"A 140 BPM chip goa track: a 1 ms radio burst with 80 years of the Sun's energy, and its real-speed whistle."},
   {"path":"nuclear-pasta/","title":"Nuclear Pasta: Chip Garage House Mix","desc":"A 130 BPM chip garage track: crushed inside a neutron star, nuclei become gnocchi, spaghetti, lasagna and swiss cheese."},
   {"path":"lich-pulsar/","title":"Lich Pulsar: Chip 2-Step Garage Mix","desc":"A 134 BPM chip 2-step track: a dead star spinning 161 times a second, and the first planets ever found beyond the Sun."},
+  {"path":"hd-189733b/","title":"HD 189733 b: Peak-Time Techno Mix","desc":"A 132 BPM chip techno track in F, its year 25 octaves up: a blue hot Jupiter where glass rain blows sideways."},
 ];
